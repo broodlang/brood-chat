@@ -1,0 +1,14 @@
+;; repro/nodedown_peer.blsp — §1.2 repro, node B (the "quitter").
+;;
+;; Comes up as a local node, stays briefly so the survivor can connect and
+;; `monitor-node` it, then **returns** — a clean process exit, which makes the
+;; OS close its Unix socket. This is the `/quit` path the finding describes
+;; (a returned process), NOT a `kill -9`. The survivor must see [:nodedown]
+;; from this clean close, promptly — long before any heartbeat timeout.
+;;
+;; Run via repro/run.sh (it sequences this against the survivor).
+
+(node-start "peerb")
+(println "peer: up as " (node-name) " — staying 1500ms, then returning (clean close)")
+(sleep 1500)
+(println "peer: returning now — socket closes")

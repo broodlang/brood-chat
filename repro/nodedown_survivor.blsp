@@ -1,0 +1,33 @@
+;; repro/nodedown_survivor.blsp — §1.2 repro, node A (the survivor).
+;;
+;; Links to node B, monitors it, then waits for [:nodedown]. B exits cleanly
+;; ~1.5s after it comes up. The runtime's heartbeat only declares a silent link
+;; down after DOWN_AFTER = 6s (HEARTBEAT_INTERVAL = 2s). So if [:nodedown]
+;; arrives well under that window, it came from the reader's socket-EOF path
+;; (close-detection), NOT from heartbeat-timeout liveness — which is exactly the
+;; behaviour finding §1.2 claimed was missing.
+;;
+;; PASS  => nodedown within 4s of monitoring (close-detection works)
+;; FAIL  => timed out (would have needed the 6s heartbeat window)
+;;
+;; Run via repro/run.sh.
+
+(node-start "peera")
+
+;; B may not have finished listening the instant we start; retry the dial.
+(defn dial-retry (n)
+  (try
+    (connect "peerb")
+    (catch e
+      (if (> n 0)
+        (do (sleep 100) (dial-retry (- n 1)))
+        (throw e)))))
+
+(let (peer (dial-retry 40))
+  (monitor-node peer)
+  (println "survivor: linked to " peer " — waiting up to 4s for [:nodedown]")
+  (receive
+    ([:nodedown p]
+      (println "PASS: received [:nodedown " p "] from peer's clean exit; (nodes) => " (nodes)))
+    (after 4000
+      (println "FAIL: no [:nodedown] within 4s of monitoring; (nodes) => " (nodes)))))

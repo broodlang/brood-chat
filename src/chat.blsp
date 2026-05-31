@@ -1,0 +1,176 @@
+(defmodule chat
+  "A silly line-based chat REPL over Brood's distributed nodes
+(ADR-073). Start two runtimes from this project, name each one, `/connect` to a
+peer, then type: every line broadcasts to each connected peer's `:inbox`.
+
+It sends *closures*: `/run <expr>` ships an actual `(fn () <expr>)` to the peer,
+which calls it and returns the value; `/say-hi` sends a closure that captures
+the sender's name locally yet computes the peer's identity on the peer — proof
+the captured environment crosses the link while free globals late-bind there.
+
+The prompt is an inline raw-mode line editor (`term-raw-enter`/`term-poll`):
+**Tab** autocompletes commands. The editor process is itself the `:inbox`, so it
+polls keystrokes and drains its mailbox in one loop — a message arriving while
+you type redraws above the prompt without eating your half-typed line.")
+
+(def *commands* ["/connect " "/say-hi" "/run " "/nodes" "/quit"])
+
+;; --- addressing -------------------------------------------------------------
+
+(defn to (node msg)
+  "Deliver `msg` to the `:inbox` process registered on `node`."
+  (send {:name :inbox :node node} msg))
+
+(defn broadcast (msg)
+  "Deliver `msg` to every currently connected peer's inbox."
+  (let (peers (nodes))
+    (if (empty? peers)
+      (show-line "** no peers yet — try /connect <name>")
+      (doseq (n peers) (to n msg)))))
+
+;; --- inline rendering (raw mode wants \r\n, so route output through here) ----
+
+(defn show-line (s)
+  "Print a full message line, clearing whatever the prompt had drawn."
+  (term-emit [[:cr] [:clear-eol] [:print s] [:nl]]))
+
+(defn draw-prompt (buf)
+  "Redraw the prompt and the current edit buffer in place."
+  (term-emit [[:cr] [:clear-eol] [:print "> "] [:print buf]]))
+
+;; --- incoming messages ------------------------------------------------------
+
+(defn handle-msg (msg)
+  (match msg
+    ([:chat from text] (show-line (str "  " from " | " text)))
+    ([:hello from] (do (monitor-node from) (show-line (str "** " from " connected"))))
+    ([:nodedown name] (show-line (str "** " name " disconnected")))
+    ([:bye from] (show-line (str "** " from " left")))
+    ([:call from label f] (do
+                            (show-line (str "** running " from "'s closure: " label))
+                            (to from
+                              [:result (node-name)
+                                label
+                                (try (f) (catch e (str "error: " e)))])))
+    ([:result from label r] (show-line (str "  " from " · " label " => " (pr-str r))))
+    (other (show-line (str "  ?? " (pr-str other))))))
+
+(defn drain (buf)
+  "Handle every queued message (non-blocking), then return `buf` unchanged."
+  (receive (msg (do (handle-msg msg) (drain buf)))
+    (after 0 buf)))
+
+;; --- commands ---------------------------------------------------------------
+
+(defn dial (name)
+  "Link to peer `name`; both sides monitor each other and print the connect."
+  (try
+    (let (peer (connect name))
+      (send (whereis :inbox) [:hello peer])  ; our inbox: watch + announce peer
+      (to peer [:hello (node-name)]))  ; their inbox: watch + announce us
+    (catch e (show-line (str "** connect failed: " (pr-str e))))))
+
+(defn say-hi ()
+  "Broadcast a closure that greets using a name captured here but computed there."
+  (let (from (node-name))
+    (broadcast [:call from
+                 "say-hi"
+                 (fn ()
+                   (str "hi "
+                     from
+                     "! you reached "
+                     (node-name)
+                     " ("
+                     (count (nodes))
+                     " peer(s) connected there)"))])))
+
+(defn run-expr (src)
+  "Build `(fn () <src>)` as a real closure and broadcast it for the peer to call."
+  (broadcast [:call (node-name) src (eval `(fn () ~(read-string src)))]))
+
+(defn rest-after (line)
+  "The line's text after its first space (the argument to a /command)."
+  (let (sp (index-of line " "))
+    (if (< sp 0) "" (substring line (+ sp 1) (string-length line)))))
+
+(defn goodbye ()
+  "Tell peers we're leaving (so they prune immediately) and signal :quit."
+  (do (doseq (n (nodes)) (to n [:bye (node-name)])) :quit))
+
+;; Run a completed line. Returns :quit to end the REPL, else nil to keep going.
+(defn run-line (line)
+  (cond
+    (= line "/quit") (goodbye)
+    (blank? line) nil
+    (= line "/nodes") (show-line (str "** connected: " (nodes)))
+    (= line "/say-hi") (say-hi)
+    (starts-with? line "/connect ") (dial (rest-after line))
+    (starts-with? line "/run ") (run-expr (rest-after line))
+    :else (broadcast [:chat (node-name) line])))
+
+;; --- Tab completion ---------------------------------------------------------
+
+(defn common-prefix--at (a b i)
+  (if (and (< i (string-length a))
+        (< i (string-length b))
+        (= (char-at a i) (char-at b i)))
+    (common-prefix--at a b (+ i 1))
+    (substring a 0 i)))
+
+(defn common-prefix (strs)
+  "Longest common leading substring shared by every string in `strs`."
+  (reduce (fn (a b) (common-prefix--at a b 0)) (first strs) (rest strs)))
+
+(defn complete (buf)
+  "Autocomplete `buf` against the command list, returning the new buffer."
+  (let (ms (filter (fn (c) (starts-with? c buf)) *commands*))
+    (cond
+      (empty? ms) buf
+      ; not a command prefix — leave it
+      (= (count ms) 1) (first ms)
+      ; unique — complete it fully
+      :else (do
+              (show-line (str "  " (join "  " ms)))
+              (common-prefix ms)))))
+
+;; --- the editor loop --------------------------------------------------------
+
+;; One process: drains its mailbox, then waits up to 60ms for a key. Tab
+;; completes, Enter runs the line, Ctrl-C/Ctrl-D quit, Backspace edits,
+;; printables append. Always redraws the prompt so async messages never clobber
+;; the line being typed.
+(defn edit (buf)
+  (let (buf (drain buf))
+    (do
+      (draw-prompt buf)
+      (let (k (term-poll 60))
+        (cond
+          (nil? k) (edit buf)
+          (string? k) (edit (str buf k))
+          (= k :tab) (edit (complete buf))
+          (= k :backspace) (edit (if (empty? buf) buf (substring buf 0 (- (string-length buf) 1))))
+          (or (= k :enter) (= k :ctrl-j) (= k :ctrl-m)) (do
+                                                          (term-emit [[:nl]])
+                                                          (if (= (run-line buf) :quit)
+                                                            :quit
+                                                            (edit "")))
+          (or (= k :ctrl-c) (= k :ctrl-d)) (do (term-emit [[:nl]]) (goodbye))
+          :else (edit buf))))))
+
+(defn main ()
+  "Entry point: name this node, register self as the inbox, run the editor."
+  (do
+    (print "node name: ")
+    (let (me (read-line))
+      (if (or (nil? me) (blank? me))
+        (println "no node name — bye")
+        (do
+          (node-start me)
+          (register :inbox (self))
+          (println "** "
+            (node-name)
+            " ready.  /connect <name>  /say-hi  /run <expr>  /nodes  /quit   (Tab completes)")
+          (term-raw-enter)
+          (try (edit "") (catch e nil))
+          (term-raw-leave)
+          (println "\nbye"))))))

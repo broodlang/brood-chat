@@ -26,8 +26,9 @@
 (let (peer (dial-retry 40))
   (monitor-node peer)
   (println "survivor: linked to " peer " — waiting up to 4s for [:nodedown]")
-  (receive
-    ([:nodedown p]
-      (println "PASS: received [:nodedown " p "] from peer's clean exit; (nodes) => " (nodes)))
+  (receive ([:nodedown p] (println "PASS: received [:nodedown "
+                            p
+                            "] from peer's clean exit; (nodes) => "
+                            (nodes)))
     (after 4000
       (println "FAIL: no [:nodedown] within 4s of monitoring; (nodes) => " (nodes)))))

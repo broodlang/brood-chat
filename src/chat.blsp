@@ -1,168 +1,325 @@
 (defmodule chat
-  "A silly line-based chat REPL over Brood's distributed nodes
-(ADR-073). Start two runtimes from this project, name each one, `/connect` to a
-peer, then type: every line broadcasts to each connected peer's `:inbox`.
+  "A distributed chat app over Brood's nodes (ADR-073), runnable as a **native GUI
+window** or a **full-screen terminal TUI** from one codebase — you pick at startup.
 
-It sends *closures*: `/run <expr>` ships an actual `(fn () <expr>)` to the peer,
-which calls it and returns the value; `/say-hi` sends a closure that captures
-the sender's name locally yet computes the peer's identity on the peer — proof
-the captured environment crosses the link while free globals late-bind there.
+Start two runtimes, name each, `/connect` to a peer, then type: every line is a
+chat message broadcast to each connected peer's `:inbox`. Slash-commands ship
+*closures*: `/run <expr>` builds a real `(fn () <expr>)` and sends it for the peer
+to call; `/say-hi` captures the sender's name here yet computes the peer's identity
+*there* — proof the captured environment crosses the link while free globals
+late-bind on the far side. Results come back and land in the log.
 
-The prompt is an inline raw-mode line editor (`term-raw-enter`/`term-poll`):
-**Tab** autocompletes commands. The editor process is itself the `:inbox`, so it
-polls keystrokes and drains its mailbox in one loop — a message arriving while
-you type redraws above the prompt without eating your half-typed line.
+It's built on `std/ui` (the TEA-style `ui-run` loop, ADR-046): a pure `chat-view`
+(model + size → a `display` render frame) and a `chat-update` (model + input →
+model). The ONLY difference between the window and the terminal is the frontend we
+hand `ui-run`: `(gui-display)` vs `*term-display*`. The same frame paints to both.
 
-(We can't reuse `std/lineedit`'s full editor: `lineedit-read` blocks on its own
-`term-poll` with no mailbox-drain hook, so async peer messages would never paint
-mid-line. But its pure completion helper fits — `highlight/common-prefix`.)")
+Peer traffic and keystrokes share one mailbox in GUI mode (`gui-open` delivers
+input there too), so we wrap the frontend's `:poll` with a *selective* receive
+(`chat--with-peers`, mirroring `ui/with-events`): a queued chat message surfaces as
+a `[:peer …]` input, otherwise we poll the frontend as usual. On the terminal the
+keyboard and the mailbox are separate sources, and the same wrapper drains both."
+  (:use ui)  ; the app framework: ui-run + the display frontends
+  (:use display)  ; render-op constructors: frame / clear / text / cursor / bar
+  (:use face))  ; named text faces (:ui/header, :ui/dim, …)
 
 (require 'highlight)  ; reuse the stdlib's longest-common-prefix completion helper
 
 (def *commands* ["/connect " "/say-hi" "/run " "/nodes" "/quit"])
 
+;; Per-sender accent colours — a peer's name picks one deterministically by its
+;; first letter, so each correspondent reads in a stable colour (avatar-style).
+(def *peer-colors* [:green :yellow :magenta :cyan :red :blue])
+
 ;; --- addressing -------------------------------------------------------------
 
-(defn to (node msg)
+(defn chat--to (node msg)
   "Deliver `msg` to the `:inbox` process registered on `node`."
   (send {:name :inbox :node node} msg))
 
-(defn broadcast (msg)
+(defn chat--broadcast (msg)
   "Deliver `msg` to every currently connected peer's inbox."
-  (let (peers (nodes))
-    (if (empty? peers)
-      (show-line "** no peers yet — try /connect <name>")
-      (doseq (n peers) (to n msg)))))
+  (doseq (n (nodes)) (chat--to n msg)))
 
-;; --- inline rendering (raw mode wants \r\n, so route output through here) ----
+(defn chat--names (peers)
+  "Render the peer list for the `/nodes` line."
+  (if (empty? peers) "(none yet)" (join ", " peers)))
 
-(defn show-line (s)
-  "Print a full message line, clearing whatever the prompt had drawn."
-  (term-emit [[:cr] [:clear-eol] [:print s] [:nl]]))
-
-(defn draw-prompt (buf)
-  "Redraw the prompt and the current edit buffer in place."
-  (term-emit [[:cr] [:clear-eol] [:print "> "] [:print buf]]))
-
-;; --- incoming messages ------------------------------------------------------
-
-(defn handle-msg (msg)
-  (match msg
-    ([:chat from text] (show-line (str "  " from " | " text)))
-    ([:hello from] (do (monitor-node from) (show-line (str "** " from " connected"))))
-    ([:nodedown name] (show-line (str "** " name " disconnected")))
-    ([:call from label f] (do
-                            (show-line (str "** running " from "'s closure: " label))
-                            (to from
-                              [:result (node-name)
-                                label
-                                (try (f) (catch e (str "error: " e)))])))
-    ([:result from label r] (show-line (str "  " from " · " label " => " (pr-str r))))
-    (other (show-line (str "  ?? " (pr-str other))))))
-
-(defn drain (buf)
-  "Handle every queued message (non-blocking), then return `buf` unchanged."
-  (receive (msg (do (handle-msg msg) (drain buf)))
-    (after 0 buf)))
-
-;; --- commands ---------------------------------------------------------------
-
-(defn dial (name)
-  "Link to peer `name`; both sides monitor each other and print the connect."
-  (try
-    (let (peer (connect name))
-      (send (whereis :inbox) [:hello peer])  ; our inbox: watch + announce peer
-      (to peer [:hello (node-name)]))  ; their inbox: watch + announce us
-    (catch e (show-line (str "** connect failed: " (pr-str e))))))
-
-(defn say-hi ()
-  "Broadcast a closure that greets using a name captured here but computed there."
-  (let (from (node-name))
-    (broadcast [:call from
-                 "say-hi"
-                 (fn ()
-                   (str "hi "
-                     from
-                     "! you reached "
-                     (node-name)
-                     " ("
-                     (count (nodes))
-                     " peer(s) connected there)"))])))
-
-(defn run-expr (src)
-  "Build `(fn () <src>)` as a real closure and broadcast it for the peer to call."
-  (broadcast [:call (node-name) src (eval `(fn () ~(read-string src)))]))
-
-(defn rest-after (line)
+(defn chat--rest-after (line)
   "The line's text after its first space (the argument to a /command)."
   (let (sp (index-of line " "))
     (if (< sp 0) "" (substring line (+ sp 1)))))
 
-;; A clean process exit closes our node socket, so peers monitoring us get
-;; [:nodedown] and prune automatically (no app-level goodbye needed) — and the
-;; same fires if we're killed or crash, which an app-level message couldn't cover.
+;; --- closures over the wire -------------------------------------------------
 
-;; Run a completed line. Returns :quit to end the REPL, else nil to keep going.
-(defn run-line (line)
-  (cond
-    (= line "/quit") :quit
-    (blank? line) nil
-    (= line "/nodes") (show-line (str "** connected: " (nodes)))
-    (= line "/say-hi") (say-hi)
-    (starts-with? line "/connect ") (dial (rest-after line))
-    (starts-with? line "/run ") (run-expr (rest-after line))
-    :else (broadcast [:chat (node-name) line])))
+(defn chat--say-hi ()
+  "Broadcast a closure greeting with a name captured here but computed there."
+  (let (from (node-name))
+    (chat--broadcast [:call from
+                       "say-hi"
+                       (fn ()
+                         (str "hi "
+                           from
+                           "! you reached "
+                           (node-name)
+                           " ("
+                           (count (nodes))
+                           " peer(s) connected there)"))])))
+
+(defn chat--run-expr (src)
+  "Build `(fn () <src>)` as a real closure and broadcast it for the peer to call."
+  (chat--broadcast [:call (node-name) src (eval `(fn () ~(read-string src)))]))
+
+;; --- the model --------------------------------------------------------------
+
+(defn chat-init (name)
+  "The starting model: this node's `name`, an empty input buffer, and a seeded log.
+`:tick-ms` is the refresh beat (also how often peer traffic is drained when idle)."
+  {:name name
+   :input ""
+   :log [{:kind :system
+          :text (str "welcome, " name " — Tab completes · Enter sends · /connect a peer to begin")}]
+   :tick-ms 250
+   :done false})
+
+(defn chat--log (m entry)
+  "Append a log `entry` to model `m`, capping history so it never grows unbounded."
+  (assoc m :log (take-last 500 (concat (get m :log) [entry]))))
+
+;; --- incoming peer messages -------------------------------------------------
+
+(defn chat--handle-peer (m msg)
+  "Fold an incoming peer message into the model (and answer `:call`s in place)."
+  (match msg
+    ([:chat from text] (chat--log m {:kind :them :from (str from) :text text}))
+    ([:hello from] (do
+                     (monitor-node from)
+                     (chat--log m {:kind :system :text (str from " connected")})))
+    ([:nodedown nm] (chat--log m {:kind :system :text (str nm " disconnected")}))
+    ([:call from label f] (do
+                            (chat--to from
+                              [:result (node-name) label (try (f) (catch e (str "error: " e)))])
+                            (chat--log m
+                              {:kind :system :text (str "ran " from "'s closure: " label)})))
+    ([:result from label r] (chat--log m
+                              {:kind :result :from (str from) :text (str label " ⇒ " (pr-str r))}))
+    (other (chat--log m {:kind :system :text (str "?? " (pr-str other))}))))
+
+;; --- commands & sending -----------------------------------------------------
+
+(defn chat--do-connect (m name)
+  "Link to peer `name`; both sides monitor each other. The `[:hello peer]` we post
+to our own inbox produces the \"connected\" log line on the next poll, via handle-peer."
+  (try
+    (let (peer (connect name))
+      (send (whereis :inbox) [:hello peer])  ; our inbox: watch + announce peer
+      (chat--to peer [:hello (node-name)])  ; their inbox: watch + announce us
+      m)
+    (catch e (chat--log m {:kind :system :text (str "connect failed: " (pr-str e))}))))
+
+(defn chat--submit (m)
+  "Run the completed input line: a /command, or a chat message broadcast to peers
+(and echoed into our own log). Returns the next model with the buffer cleared."
+  (let (line (get m :input)
+        m2 (assoc m :input ""))
+    (cond
+      (blank? line) m2
+      (= line "/quit") (assoc m2 :done true)
+      (= line "/nodes") (chat--log m2
+                          {:kind :system :text (str "connected: " (chat--names (nodes)))})
+      (= line "/say-hi") (do
+                           (chat--say-hi)
+                           (chat--log m2
+                             {:kind :system :text "shipped /say-hi closure to all peers"}))
+      (starts-with? line "/connect ") (chat--do-connect m2 (chat--rest-after line))
+      (starts-with? line "/run ") (do
+                                    (chat--run-expr (chat--rest-after line))
+                                    (chat--log m2
+                                      {:kind :system
+                                       :text (str "shipped closure: " (chat--rest-after line))}))
+      :else (do
+              (chat--broadcast [:chat (node-name) line])
+              (chat--log m2 {:kind :me :text line})))))
 
 ;; --- Tab completion ---------------------------------------------------------
 
-(defn complete (buf)
-  "Autocomplete `buf` against the command list, returning the new buffer."
-  (let (ms (filter (fn (c) (starts-with? c buf)) *commands*))
+(defn chat--complete (m)
+  "Autocomplete the input against the command list. A unique hit fills it in; a
+shared prefix fills as far as it can and lists the candidates in the log."
+  (let (buf (get m :input)
+        ms (filter (fn (c) (starts-with? c buf)) *commands*))
     (cond
-      (empty? ms) buf
-      ; not a command prefix — leave it
-      (= (count ms) 1) (first ms)
-      ; unique — complete it fully
+      (empty? ms) m
+      (= (count ms) 1) (assoc m :input (first ms))
+      :else (chat--log (assoc m :input (highlight/common-prefix ms))
+              {:kind :system :text (str "matches: " (join "   " ms))}))))
+
+;; --- input classification ---------------------------------------------------
+
+(defn chat--printable? (k)
+  "A printable key is a 1-char string."
+  (and (string? k) (= (string-length k) 1)))
+(defn chat--enter? (k)
+  "Treat Enter and its raw-mode aliases alike."
+  (or (= k :enter) (= k :ctrl-j) (= k :ctrl-m)))
+(defn chat--quit? (k)
+  "Keys that end the session."
+  (or (= k :ctrl-c) (= k :ctrl-d) (= k :escape) (= k :close)))
+(defn chat--peer? (x)
+  "Did the frontend hand us a wrapped peer message?"
+  (and (vector? x) (= (first x) :peer)))
+(defn chat--backspace (s)
+  "Drop the last char of `s`."
+  (if (empty? s) s (substring s 0 (- (string-length s) 1))))
+
+(defn chat-update (m input cols rows)
+  "ui-run update: fold one input into the next model. Printables extend the buffer,
+Backspace trims it, Tab completes, Enter submits, Ctrl-C/Ctrl-D/Esc quit, and a
+`[:peer msg]` (peer traffic surfaced by `chat--with-peers`) is handled in place.
+`:tick` and anything else (mouse, resize) are no-ops."
+  (cond
+    (= input :tick) m
+    (chat--printable? input) (assoc m :input (str (get m :input) input))
+    (= input :backspace) (assoc m :input (chat--backspace (get m :input)))
+    (= input :tab) (chat--complete m)
+    (chat--enter? input) (chat--submit m)
+    (chat--quit? input) (assoc m :done true)
+    (chat--peer? input) (chat--handle-peer m (nth input 1))
+    :else m))
+
+;; --- view (pure: model + size → a render frame) -----------------------------
+
+(defn chat--clamp (s width)
+  "Truncate `s` to `width` cells, marking the cut with an ellipsis."
+  (cond
+    (<= (string-length s) width) s
+    (< width 1) ""
+    :else (str (substring s 0 (- width 1)) "…")))
+
+(defn chat--center (s cols)
+  "The left column that centres `s` within `cols`."
+  (max 0 (quot (- cols (string-length s)) 2)))
+
+(defn chat--peer-color (name-in)
+  "A stable accent colour for `name-in` (string or node keyword), by its first letter."
+  (let (name (str name-in))
+    (if (blank? name)
+      :green
+      (let (i (index-of "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ" (substring name 0 1)))
+        (nth *peer-colors* (rem (if (< i 0) 0 i) (count *peer-colors*)))))))
+
+(defn chat--entry-ops (e row cols)
+  "Render one log entry as a list of text ops on `row`. Own messages sit right,
+peers left with a coloured name chip, results in magenta, system notes centred/dim."
+  (let (kind (get e :kind)
+        txt (get e :text))
+    (cond
+      (= kind :me) (let (s (str (chat--clamp txt (- cols 8)) "  ◂ you")
+                         x (max 1 (- cols (string-length s) 1)))
+                     [(text row x s {:fg :cyan :bold true})])
+      (= kind :them) (let (from (get e :from)
+                           chip (str from " ▸ ")
+                           body (chat--clamp txt (- cols (string-length chip) 2)))
+                       [(text row 1 chip {:fg (chat--peer-color from) :bold true}) (text row
+                                                                                     (+ 1
+                                                                                       (string-length chip))
+                                                                                     body
+                                                                                     {})])
+      (= kind :result) [(text row
+                          1
+                          (chat--clamp (str (get e :from) " · " txt) (- cols 2))
+                          {:fg :magenta})]
+      :else (let (s (chat--clamp (str "— " txt " —") (- cols 2)))
+              [(text row (chat--center s cols) s (face :ui/dim))]))))
+
+(defn chat--entries-ops--acc (entries row cols acc)
+  (if (empty? entries)
+    acc
+    (chat--entries-ops--acc (rest entries)
+      (+ row 1)
+      cols
+      (concat acc (chat--entry-ops (first entries) row cols)))))
+
+(defn chat--entries-ops (entries row cols)
+  "Lay `entries` out top-to-bottom from `row`, returning one flat list of ops."
+  (chat--entries-ops--acc entries row cols '()))
+
+(defn chat-view (m cols rows)
+  "ui-run view: a header bar, the message log (newest pinned to the bottom), a hint
+bar, and the input prompt with the cursor at the end of the buffer. Pure."
+  (let (input (get m :input)
+         log-h
+         (max 0 (- rows 3))  ; log occupies rows 1 .. rows-3
+         shown
+         (take-last log-h (get m :log))
+         base
+         (- rows 2 (count shown))  ; bottom-align the visible slice
+         peers
+         (count (nodes))
+         hdr
+         (str " ⬢ broodchat    "
+           (get m :name)
+           "    ·    "
+           peers
+           " peer"
+           (if (= peers 1) "" "s")
+           " connected")
+         hint
+         " Tab complete · Enter send · /connect ⟨name⟩ · /say-hi · /run ⟨expr⟩ · /nodes · Ctrl-C quit"
+         prompt
+         (str "› " input))
+    (apply frame
+      (concat [(clear) (bar 0 cols hdr {:face {:bg :blue :fg :white :bold true}})]
+        (chat--entries-ops shown base cols)
+        [(bar (- rows 2) cols hint {:face (face :ui/dim)}) (text (- rows 1)
+                                                             0
+                                                             (chat--clamp prompt cols)
+                                                             {:bold true})
+          (cursor (- rows 1) (min (- cols 1) (+ 2 (string-length input))))]))))
+
+;; --- the peer-traffic frontend wrapper --------------------------------------
+
+(defn chat--with-peers (display)
+  "Wrap `display` so its `:poll` first returns any queued chat-protocol message as a
+`[:peer msg]` input, else polls the frontend as usual. A *selective* receive (it
+matches only the five chat shapes) so GUI key/mouse messages — which share this
+process's mailbox — stay queued for the frontend's own poll. Mirrors `ui/with-events`."
+  (assoc display
+    :poll
+    (fn (ms)
+      (let (msg (receive ([:chat from text] [:peer [:chat from text]])
+                  ([:hello from] [:peer [:hello from]])
+                  ([:nodedown nm] [:peer [:nodedown nm]])
+                  ([:call from label f] [:peer [:call from label f]])
+                  ([:result from label r] [:peer [:result from label r]])
+                  (after 0 nil)))
+        (if (nil? msg) ((get display :poll) ms) msg)))))
+
+;; --- entry point ------------------------------------------------------------
+
+(defn chat--choose-mode (args)
+  "Pick the frontend: a `gui`/`tui` startup arg if given, else ask on the terminal.
+Defaults to the terminal (works everywhere, including over SSH)."
+  (let (a (first args))
+    (cond
+      (or (= a "gui") (= a "g")) :gui
+      (or (= a "tui") (= a "t") (= a "terminal")) :tui
       :else (do
-              (show-line (str "  " (join "  " ms)))
-              (highlight/common-prefix ms)))))
+              (print "open in [g]ui window or [t]erminal? (g/t) ")
+              (let (r (read-line))
+                (if (or (= r "g") (= r "G") (= r "gui") (= r "GUI")) :gui :tui))))))
 
-;; --- the editor loop --------------------------------------------------------
-
-;; One process: drains its mailbox, then waits up to 60ms for a key. Tab
-;; completes, Enter runs the line, Ctrl-C/Ctrl-D quit, Backspace edits,
-;; printables append. Always redraws the prompt so async messages never clobber
-;; the line being typed.
-(defn edit (buf)
-  (let (buf (drain buf))
-    (draw-prompt buf)
-    (let (k (term-poll 60))
-      (cond
-        (nil? k) (edit buf)
-        (string? k) (edit (str buf k))
-        (= k :tab) (edit (complete buf))
-        (= k :backspace) (edit (if (empty? buf) buf (substring buf 0 (- (string-length buf) 1))))
-        (or (= k :enter) (= k :ctrl-j) (= k :ctrl-m)) (do
-                                                        (term-emit [[:nl]])
-                                                        (if (= (run-line buf) :quit)
-                                                          :quit
-                                                          (edit "")))
-        (or (= k :ctrl-c) (= k :ctrl-d)) (do (term-emit [[:nl]]) :quit)
-        :else (edit buf)))))
-
-(defn main ()
-  "Entry point: name this node, register self as the inbox, run the editor."
-  (print "node name: ")
-  (let (me (read-line))
-    (if (or (nil? me) (blank? me))
-      (println "no node name — bye")
-      (do
-        (node-start me)
-        (register :inbox (self))
-        (println "** "
-          (node-name)
-          " ready.  /connect <name>  /say-hi  /run <expr>  /nodes  /quit   (Tab completes)")
-        (term-raw-enter)
-        (try (edit "") (catch e nil))
-        (term-raw-leave)
-        (println "\nbye")))))
+(defn main (& args)
+  "Entry point: choose a frontend, name this node, register self as the inbox, and
+run the chat app over the chosen display — a native window or the terminal."
+  (let (mode (chat--choose-mode args))
+    (print "node name: ")
+    (let (me (read-line))
+      (if (or (nil? me) (blank? me))
+        (println "no node name — bye")
+        (do
+          (node-start me)
+          (register :inbox (self))
+          (let (display (chat--with-peers (if (= mode :gui) (gui-display) *term-display*)))
+            (ui-run (chat-init me) chat-view chat-update display))
+          (println "bye"))))))

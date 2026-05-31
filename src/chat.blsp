@@ -45,7 +45,6 @@ you type redraws above the prompt without eating your half-typed line.")
     ([:chat from text] (show-line (str "  " from " | " text)))
     ([:hello from] (do (monitor-node from) (show-line (str "** " from " connected"))))
     ([:nodedown name] (show-line (str "** " name " disconnected")))
-    ([:bye from] (show-line (str "** " from " left")))
     ([:call from label f] (do
                             (show-line (str "** running " from "'s closure: " label))
                             (to from
@@ -91,16 +90,16 @@ you type redraws above the prompt without eating your half-typed line.")
 (defn rest-after (line)
   "The line's text after its first space (the argument to a /command)."
   (let (sp (index-of line " "))
-    (if (< sp 0) "" (substring line (+ sp 1) (string-length line)))))
+    (if (< sp 0) "" (substring line (+ sp 1)))))
 
-(defn goodbye ()
-  "Tell peers we're leaving (so they prune immediately) and signal :quit."
-  (do (doseq (n (nodes)) (to n [:bye (node-name)])) :quit))
+;; A clean process exit closes our node socket, so peers monitoring us get
+;; [:nodedown] and prune automatically (no app-level goodbye needed) — and the
+;; same fires if we're killed or crash, which an app-level message couldn't cover.
 
 ;; Run a completed line. Returns :quit to end the REPL, else nil to keep going.
 (defn run-line (line)
   (cond
-    (= line "/quit") (goodbye)
+    (= line "/quit") :quit
     (blank? line) nil
     (= line "/nodes") (show-line (str "** connected: " (nodes)))
     (= line "/say-hi") (say-hi)
@@ -141,36 +140,34 @@ you type redraws above the prompt without eating your half-typed line.")
 ;; the line being typed.
 (defn edit (buf)
   (let (buf (drain buf))
-    (do
-      (draw-prompt buf)
-      (let (k (term-poll 60))
-        (cond
-          (nil? k) (edit buf)
-          (string? k) (edit (str buf k))
-          (= k :tab) (edit (complete buf))
-          (= k :backspace) (edit (if (empty? buf) buf (substring buf 0 (- (string-length buf) 1))))
-          (or (= k :enter) (= k :ctrl-j) (= k :ctrl-m)) (do
-                                                          (term-emit [[:nl]])
-                                                          (if (= (run-line buf) :quit)
-                                                            :quit
-                                                            (edit "")))
-          (or (= k :ctrl-c) (= k :ctrl-d)) (do (term-emit [[:nl]]) (goodbye))
-          :else (edit buf))))))
+    (draw-prompt buf)
+    (let (k (term-poll 60))
+      (cond
+        (nil? k) (edit buf)
+        (string? k) (edit (str buf k))
+        (= k :tab) (edit (complete buf))
+        (= k :backspace) (edit (if (empty? buf) buf (substring buf 0 (- (string-length buf) 1))))
+        (or (= k :enter) (= k :ctrl-j) (= k :ctrl-m)) (do
+                                                        (term-emit [[:nl]])
+                                                        (if (= (run-line buf) :quit)
+                                                          :quit
+                                                          (edit "")))
+        (or (= k :ctrl-c) (= k :ctrl-d)) (do (term-emit [[:nl]]) :quit)
+        :else (edit buf)))))
 
 (defn main ()
   "Entry point: name this node, register self as the inbox, run the editor."
-  (do
-    (print "node name: ")
-    (let (me (read-line))
-      (if (or (nil? me) (blank? me))
-        (println "no node name — bye")
-        (do
-          (node-start me)
-          (register :inbox (self))
-          (println "** "
-            (node-name)
-            " ready.  /connect <name>  /say-hi  /run <expr>  /nodes  /quit   (Tab completes)")
-          (term-raw-enter)
-          (try (edit "") (catch e nil))
-          (term-raw-leave)
-          (println "\nbye"))))))
+  (print "node name: ")
+  (let (me (read-line))
+    (if (or (nil? me) (blank? me))
+      (println "no node name — bye")
+      (do
+        (node-start me)
+        (register :inbox (self))
+        (println "** "
+          (node-name)
+          " ready.  /connect <name>  /say-hi  /run <expr>  /nodes  /quit   (Tab completes)")
+        (term-raw-enter)
+        (try (edit "") (catch e nil))
+        (term-raw-leave)
+        (println "\nbye")))))

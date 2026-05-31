@@ -11,7 +11,13 @@ the captured environment crosses the link while free globals late-bind there.
 The prompt is an inline raw-mode line editor (`term-raw-enter`/`term-poll`):
 **Tab** autocompletes commands. The editor process is itself the `:inbox`, so it
 polls keystrokes and drains its mailbox in one loop — a message arriving while
-you type redraws above the prompt without eating your half-typed line.")
+you type redraws above the prompt without eating your half-typed line.
+
+(We can't reuse `std/lineedit`'s full editor: `lineedit-read` blocks on its own
+`term-poll` with no mailbox-drain hook, so async peer messages would never paint
+mid-line. But its pure completion helper fits — `highlight/common-prefix`.)")
+
+(require 'highlight)  ; reuse the stdlib's longest-common-prefix completion helper
 
 (def *commands* ["/connect " "/say-hi" "/run " "/nodes" "/quit"])
 
@@ -109,17 +115,6 @@ you type redraws above the prompt without eating your half-typed line.")
 
 ;; --- Tab completion ---------------------------------------------------------
 
-(defn common-prefix--at (a b i)
-  (if (and (< i (string-length a))
-        (< i (string-length b))
-        (= (char-at a i) (char-at b i)))
-    (common-prefix--at a b (+ i 1))
-    (substring a 0 i)))
-
-(defn common-prefix (strs)
-  "Longest common leading substring shared by every string in `strs`."
-  (reduce (fn (a b) (common-prefix--at a b 0)) (first strs) (rest strs)))
-
 (defn complete (buf)
   "Autocomplete `buf` against the command list, returning the new buffer."
   (let (ms (filter (fn (c) (starts-with? c buf)) *commands*))
@@ -130,7 +125,7 @@ you type redraws above the prompt without eating your half-typed line.")
       ; unique — complete it fully
       :else (do
               (show-line (str "  " (join "  " ms)))
-              (common-prefix ms)))))
+              (highlight/common-prefix ms)))))
 
 ;; --- the editor loop --------------------------------------------------------
 

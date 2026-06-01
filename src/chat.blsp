@@ -19,11 +19,11 @@ input there too), so we wrap the frontend's `:poll` with a *selective* receive
 (`chat--with-peers`, mirroring `ui/with-events`): a queued chat message surfaces as
 a `[:peer …]` input, otherwise we poll the frontend as usual. On the terminal the
 keyboard and the mailbox are separate sources, and the same wrapper drains both."
-  (:use ui)  ; the app framework: ui-run + the display frontends
-  (:use display)  ; render-op constructors: frame / clear / text / cursor / bar
-  (:use face))  ; named text faces (:ui/header, :ui/dim, …)
+  (:use editor/ui)  ; the app framework: ui-run + the display frontends
+  (:use editor/display)  ; render-op constructors: frame / clear / text / cursor / bar
+  (:use editor/face))  ; named text faces (:ui/header, :ui/dim, …)
 
-(require 'highlight)  ; reuse the stdlib's longest-common-prefix completion helper
+(require 'editor/highlight)  ; reuse the stdlib's longest-common-prefix completion helper
 
 (def *commands* ["/connect " "/say-hi" "/run " "/nodes" "/quit"])
 
@@ -151,7 +151,7 @@ shared prefix fills as far as it can and lists the candidates in the log."
     (cond
       (empty? ms) m
       (= (count ms) 1) (assoc m :input (first ms))
-      :else (chat--log (assoc m :input (highlight/common-prefix ms))
+      :else (chat--log (assoc m :input (editor/highlight/common-prefix ms))
               {:kind :system :text (str "matches: " (join "   " ms))}))))
 
 ;; --- input classification ---------------------------------------------------

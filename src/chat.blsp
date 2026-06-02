@@ -41,9 +41,14 @@ keyboard and the mailbox are separate sources, and the same wrapper drains both.
   "Deliver `msg` to every currently connected peer's inbox."
   (doseq (n (nodes)) (chat--to n msg)))
 
+(defn chat--node-str (n)
+  "A node name for display: `(name …)` drops the leading colon a node *keyword*
+stringifies with (`:alice@host` → `\"alice@host\"`); a string passes through."
+  (name n))
+
 (defn chat--names (peers)
   "Render the peer list for the `/nodes` line."
-  (if (empty? peers) "(none yet)" (join ", " peers)))
+  (if (empty? peers) "(none yet)" (join ", " (map chat--node-str peers))))
 
 (defn chat--rest-after (line)
   "The line's text after its first space (the argument to a /command)."
@@ -59,9 +64,9 @@ keyboard and the mailbox are separate sources, and the same wrapper drains both.
                        "say-hi"
                        (fn ()
                          (str "hi "
-                           from
+                           (chat--node-str from)
                            "! you reached "
-                           (node-name)
+                           (chat--node-str (node-name))
                            " ("
                            (count (nodes))
                            " peer(s) connected there)"))])))
@@ -91,18 +96,21 @@ keyboard and the mailbox are separate sources, and the same wrapper drains both.
 (defn chat--handle-peer (m msg)
   "Fold an incoming peer message into the model (and answer `:call`s in place)."
   (match msg
-    ([:chat from text] (chat--log m {:kind :them :from (str from) :text text}))
+    ([:chat from text] (chat--log m {:kind :them :from (chat--node-str from) :text text}))
     ([:hello from] (do
                      (monitor-node from)
-                     (chat--log m {:kind :system :text (str from " connected")})))
-    ([:nodedown nm] (chat--log m {:kind :system :text (str nm " disconnected")}))
+                     (chat--log m {:kind :system :text (str (chat--node-str from) " connected")})))
+    ([:nodedown nm] (chat--log m {:kind :system :text (str (chat--node-str nm) " disconnected")}))
     ([:call from label f] (do
                             (chat--to from
                               [:result (node-name) label (try (f) (catch e (str "error: " e)))])
                             (chat--log m
-                              {:kind :system :text (str "ran " from "'s closure: " label)})))
+                              {:kind :system
+                               :text (str "ran " (chat--node-str from) "'s closure: " label)})))
     ([:result from label r] (chat--log m
-                              {:kind :result :from (str from) :text (str label " ⇒ " (pr-str r))}))
+                              {:kind :result
+                               :from (chat--node-str from)
+                               :text (str label " ⇒ " (pr-str r))}))
     (other (chat--log m {:kind :system :text (str "?? " (pr-str other))}))))
 
 ;; --- commands & sending -----------------------------------------------------
@@ -232,42 +240,28 @@ peers left with a coloured name chip, results in magenta, system notes centred/d
       :else (let (s (chat--clamp (str "— " txt " —") (- cols 2)))
               [(text row (chat--center s cols) s (face :ui/dim))]))))
 
-(defn chat--entries-ops--acc (entries row cols acc)
-  (if (empty? entries)
-    acc
-    (chat--entries-ops--acc (rest entries)
-      (+ row 1)
-      cols
-      (concat acc (chat--entry-ops (first entries) row cols)))))
-
 (defn chat--entries-ops (entries row cols)
   "Lay `entries` out top-to-bottom from `row`, returning one flat list of ops."
-  (chat--entries-ops--acc entries row cols '()))
+  (mapcat (fn (i) (chat--entry-ops (nth entries i) (+ row i) cols))
+    (range (count entries))))
 
 (defn chat-view (m cols rows)
   "ui-run view: a header bar, the message log (newest pinned to the bottom), a hint
 bar, and the input prompt with the cursor at the end of the buffer. Pure."
   (let (input (get m :input)
-         log-h
-         (max 0 (- rows 3))  ; log occupies rows 1 .. rows-3
-         shown
-         (take-last log-h (get m :log))
-         base
-         (- rows 2 (count shown))  ; bottom-align the visible slice
-         peers
-         (count (nodes))
-         hdr
-         (str " ⬢ broodchat    "
-           (get m :name)
-           "    ·    "
-           peers
-           " peer"
-           (if (= peers 1) "" "s")
-           " connected")
-         hint
-         " Tab complete · Enter send · /connect ⟨name⟩ · /say-hi · /run ⟨expr⟩ · /nodes · Ctrl-C quit"
-         prompt
-         (str "› " input))
+        log-h (max 0 (- rows 3))  ; log occupies rows 1 .. rows-3
+        shown (take-last log-h (get m :log))
+        base (- rows 2 (count shown))  ; bottom-align the visible slice
+        peers (count (nodes))
+        hdr (str " ⬢ broodchat    "
+              (get m :name)
+              "    ·    "
+              peers
+              " peer"
+              (if (= peers 1) "" "s")
+              " connected")
+        hint " Tab complete · Enter send · /connect ⟨name⟩ · /say-hi · /run ⟨expr⟩ · /nodes · Ctrl-C quit"
+        prompt (str "› " input))
     (apply frame
       (concat [(clear) (bar 0 cols hdr {:face {:bg :blue :fg :white :bold true}})]
         (chat--entries-ops shown base cols)

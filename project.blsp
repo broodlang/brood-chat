@@ -1,6 +1,6 @@
-;; connect-test — a Brood project.
+;; chat — a distributed chat app over Brood's nodes (GUI window or terminal TUI).
 (project :name
-  "connect-test"
+  "chat"
   :version
   "0.1.0"
   :main

@@ -1,0 +1,103 @@
+;; Tests for the chat module's pure core — the model, the update folds, command
+;; dispatch, Tab completion and the view helpers. `(:use chat)` brings chat's public
+;; defs into scope; the internal `chat--` helpers stay private to the module (`:use`
+;; doesn't re-export the `--` names), so we reach them qualified as `chat/chat--…`.
+;; `(:use test)` brings the describe/test/assert=/is/refute macros. `nest test`
+;; loads src/ first, so `chat` is available.
+;;
+;; The networked paths (broadcast, connect, closures over the wire) aren't exercised
+;; here — they need two live nodes; see `repro/run.sh` for that regression check.
+(defmodule chat-test (:use chat) (:use test))
+
+(defn last-entry (m)
+  "The most recent log entry of model `m`."
+  (last (get m :log)))
+
+(describe "chat: model & input"
+  (test "init seeds one system line and an empty buffer"
+    (let (m (chat-init "alice"))
+      (assert= (get m :input) "")
+      (assert= (get m :name) "alice")
+      (refute (get m :done))
+      (assert= (count (get m :log)) 1)
+      (assert= (get (first (get m :log)) :kind) :system)))
+
+  (test "printable keys extend the buffer, backspace trims it"
+    (let (m (-> (chat-init "a") (chat-update "h" 80 24) (chat-update "i" 80 24)))
+      (assert= (get m :input) "hi")
+      (assert= (get (chat-update m :backspace 80 24) :input) "h")))
+
+  (test "tick and unhandled inputs are no-ops on the buffer"
+    (let (m (chat-update (chat-init "a") "x" 80 24))
+      (assert= (get (chat-update m :tick 80 24) :input) "x")
+      (assert= (get (chat-update m [:mouse 1 1] 80 24) :input) "x")))
+
+  (test "quit keys set :done"
+    (is (get (chat-update (chat-init "a") :ctrl-c 80 24) :done))
+    (is (get (chat-update (chat-init "a") :escape 80 24) :done))))
+
+(describe "chat: submit & commands"
+  (test "a plain line echoes into the log as :me and clears the buffer"
+    (let (m (chat/chat--submit (assoc (chat-init "a") :input "hello")))
+      (assert= (get m :input) "")
+      (assert= (get (last-entry m) :kind) :me)
+      (assert= (get (last-entry m) :text) "hello")))
+
+  (test "/quit sets :done"
+    (is (get (chat/chat--submit (assoc (chat-init "a") :input "/quit")) :done)))
+
+  (test "blank input is a no-op submit"
+    (let (m (chat/chat--submit (assoc (chat-init "a") :input "   ")))
+      (assert= (count (get m :log)) 1)))
+
+  (test "/nodes logs a system line"
+    (let (m (chat/chat--submit (assoc (chat-init "a") :input "/nodes")))
+      (assert= (get (last-entry m) :kind) :system))))
+
+(describe "chat: tab completion"
+  (test "a unique prefix fills the whole command in"
+    (assert= (get (chat/chat--complete (assoc (chat-init "a") :input "/co")) :input) "/connect "))
+
+  (test "an ambiguous prefix fills the shared prefix and lists matches"
+    (let (m (chat/chat--complete (assoc (chat-init "a") :input "/")))
+      (is (starts-with? (get m :input) "/"))
+      (assert= (get (last-entry m) :kind) :system)))
+
+  (test "no match leaves the buffer untouched"
+    (assert= (get (chat/chat--complete (assoc (chat-init "a") :input "/zzz")) :input) "/zzz")))
+
+(describe "chat: incoming peer messages"
+  (test "[:chat from text] becomes a :them entry tagged with the sender"
+    (let (m (chat/chat--handle-peer (chat-init "a") [:chat :bob "hi"]))
+      (assert= (get (last-entry m) :kind) :them)
+      (assert= (get (last-entry m) :from) "bob")  ; node keyword shown without its colon
+      (assert= (get (last-entry m) :text) "hi")))
+
+  (test "[:result from label r] renders the closure's return"
+    (let (m (chat/chat--handle-peer (chat-init "a") [:result :bob "say-hi" "ok"]))
+      (assert= (get (last-entry m) :kind) :result))))
+
+(describe "chat: view helpers"
+  (test "rest-after returns the argument past the first space"
+    (assert= (chat/chat--rest-after "/connect bob") "bob")
+    (assert= (chat/chat--rest-after "/nodes") ""))
+
+  (test "names joins peers without their colons, or a placeholder when empty"
+    (assert= (chat/chat--names []) "(none yet)")
+    (assert= (chat/chat--names [:alice :bob]) "alice, bob"))
+
+  (test "node-str drops a node keyword's leading colon and passes strings through"
+    (assert= (chat/chat--node-str :alice@host) "alice@host")
+    (assert= (chat/chat--node-str "bob") "bob"))
+
+  (test "clamp truncates with an ellipsis past the width"
+    (assert= (chat/chat--clamp "hello" 10) "hello")
+    (assert= (chat/chat--clamp "hello" 3) "he…"))
+
+  (test "peer-color is stable per first letter"
+    (assert= (chat/chat--peer-color "bob") (chat/chat--peer-color "bilbo")))
+
+  (test "entries-ops lays entries on consecutive rows"
+    (let (ops (chat/chat--entries-ops [{:kind :system :text "x"} {:kind :system :text "y"}] 5 80))
+      (assert= (nth (first ops) 1) 5)
+      (assert= (nth (second ops) 1) 6))))

@@ -1,4 +1,4 @@
-# Findings from building `connect-test` — all resolved
+# Findings from building `chat` — all resolved
 
 This document started as a full record of everything wrong, missing, surprising,
 or delightful while building the distributed-node chat REPL in `src/chat.blsp`

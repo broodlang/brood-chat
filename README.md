@@ -41,7 +41,10 @@ hello!              # any plain line is broadcast to every connected peer
 /quit               # leave (Ctrl-C / Esc also quit)
 ```
 
-Tab completes commands; Enter sends.
+Tab completes commands; Enter sends. The input line is the stdlib line editor
+(`editor/lineedit`), so the full emacs/readline keymap works: C-a/C-e, M-b/M-f,
+C-k/C-u/C-w kill, C-y yank, C-t, ↑/↓ recall earlier sends, and C-r
+reverse-searches them. C-d on an empty line quits (mid-line it deletes forward).
 
 ## Tests
 

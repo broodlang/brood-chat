@@ -5,6 +5,10 @@
 ;; `(:use test)` brings the describe/test/assert=/is/refute macros. `nest test`
 ;; loads src/ first, so `chat` is available.
 ;;
+;; The input line is a `editor/lineedit` state on `:edit` (text + point + kill-ring +
+;; history), so editing is driven through `chat-update` with key inputs and asserted
+;; via the edit state's `:text`/`:point`.
+;;
 ;; The networked paths (broadcast, connect, closures over the wire) aren't exercised
 ;; here — they need two live nodes; see `repro/run.sh` for that regression check.
 (defmodule chat-test (:use chat) (:use test))
@@ -13,58 +17,94 @@
   "The most recent log entry of model `m`."
   (last (get m :log)))
 
+(defn input-text (m)
+  "The input line's current text."
+  (get (get m :edit) :text))
+
+(defn input-point (m)
+  "The input line's cursor position."
+  (get (get m :edit) :point))
+
+(defn feed (m keys)
+  "Fold a list of key inputs through `chat-update`."
+  (fold (fn (m k) (chat-update m k 80 24)) m keys))
+
+(defn type-line (m s)
+  "Type string `s` into the model one character at a time."
+  (feed m (string->list s)))
+
 (describe "chat: model & input"
-  (test "init seeds one system line and an empty buffer"
+  (test "init seeds one system line and an empty input editor"
     (let (m (chat-init "alice"))
-      (assert= (get m :input) "")
+      (assert= (input-text m) "")
+      (assert= (input-point m) 0)
       (assert= (get m :name) "alice")
       (refute (get m :done))
       (assert= (count (get m :log)) 1)
       (assert= (get (first (get m :log)) :kind) :system)))
 
-  (test "printable keys extend the buffer, backspace trims it"
-    (let (m (-> (chat-init "a") (chat-update "h" 80 24) (chat-update "i" 80 24)))
-      (assert= (get m :input) "hi")
-      (assert= (get (chat-update m :backspace 80 24) :input) "h")))
+  (test "printable keys extend the line, backspace trims it"
+    (let (m (type-line (chat-init "a") "hi"))
+      (assert= (input-text m) "hi")
+      (assert= (input-text (chat-update m :backspace 80 24)) "h")))
 
-  (test "tick and unhandled inputs are no-ops on the buffer"
-    (let (m (chat-update (chat-init "a") "x" 80 24))
-      (assert= (get (chat-update m :tick 80 24) :input) "x")
-      (assert= (get (chat-update m [:mouse 1 1] 80 24) :input) "x")))
+  (test "cursor motion: C-a / C-f edit mid-line"
+    (let (m (feed (type-line (chat-init "a") "bc") [:ctrl-a "a"]))
+      (assert= (input-text m) "abc")
+      (assert= (input-point m) 1)))
 
-  (test "quit keys set :done"
+  (test "kill and yank round-trip the line (C-u / C-y)"
+    (let (m (feed (type-line (chat-init "a") "hello") [:ctrl-u :ctrl-y]))
+      (assert= (input-text m) "hello")))
+
+  (test "tick and unhandled inputs are no-ops on the line"
+    (let (m (type-line (chat-init "a") "x"))
+      (assert= (input-text (chat-update m :tick 80 24)) "x")
+      (assert= (input-text (chat-update m [:mouse 1 1] 80 24)) "x")))
+
+  (test "a submitted line is recalled by history (↑)"
+    (let (m (feed (type-line (chat-init "a") "/nodes") [:enter :up]))
+      (assert= (input-text m) "/nodes")))
+
+  (test "quit keys set :done — and mid-line C-d deletes forward instead"
     (is (get (chat-update (chat-init "a") :ctrl-c 80 24) :done))
-    (is (get (chat-update (chat-init "a") :escape 80 24) :done))))
+    (is (get (chat-update (chat-init "a") :escape 80 24) :done))
+    (is (get (chat-update (chat-init "a") :ctrl-d 80 24) :done))  ; empty line → EOF quits
+    (let (m (feed (type-line (chat-init "a") "ab") [:ctrl-a :ctrl-d]))
+      (refute (get m :done))
+      (assert= (input-text m) "b"))))
 
 (describe "chat: submit & commands"
-  (test "a plain line echoes into the log as :me and clears the buffer"
-    (let (m (chat/chat--submit (assoc (chat-init "a") :input "hello")))
-      (assert= (get m :input) "")
+  (test "a plain line echoes into the log as :me and resets the editor"
+    (let (m (chat-update (type-line (chat-init "a") "hello") :enter 80 24))
+      (assert= (input-text m) "")
       (assert= (get (last-entry m) :kind) :me)
       (assert= (get (last-entry m) :text) "hello")))
 
   (test "/quit sets :done"
-    (is (get (chat/chat--submit (assoc (chat-init "a") :input "/quit")) :done)))
+    (is (get (chat/chat--submit (chat-init "a") "/quit") :done)))
 
   (test "blank input is a no-op submit"
-    (let (m (chat/chat--submit (assoc (chat-init "a") :input "   ")))
+    (let (m (chat/chat--submit (chat-init "a") "   "))
       (assert= (count (get m :log)) 1)))
 
   (test "/nodes logs a system line"
-    (let (m (chat/chat--submit (assoc (chat-init "a") :input "/nodes")))
+    (let (m (chat/chat--submit (chat-init "a") "/nodes"))
       (assert= (get (last-entry m) :kind) :system))))
 
 (describe "chat: tab completion"
   (test "a unique prefix fills the whole command in"
-    (assert= (get (chat/chat--complete (assoc (chat-init "a") :input "/co")) :input) "/connect "))
+    (let (m (chat-update (type-line (chat-init "a") "/co") :tab 80 24))
+      (assert= (input-text m) "/connect ")
+      (assert= (input-point m) 9)))
 
   (test "an ambiguous prefix fills the shared prefix and lists matches"
-    (let (m (chat/chat--complete (assoc (chat-init "a") :input "/")))
-      (is (starts-with? (get m :input) "/"))
+    (let (m (chat-update (type-line (chat-init "a") "/") :tab 80 24))
+      (is (starts-with? (input-text m) "/"))
       (assert= (get (last-entry m) :kind) :system)))
 
-  (test "no match leaves the buffer untouched"
-    (assert= (get (chat/chat--complete (assoc (chat-init "a") :input "/zzz")) :input) "/zzz")))
+  (test "no match leaves the line untouched"
+    (assert= (input-text (chat-update (type-line (chat-init "a") "/zzz") :tab 80 24)) "/zzz")))
 
 (describe "chat: incoming peer messages"
   (test "[:chat from text] becomes a :them entry tagged with the sender"

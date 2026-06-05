@@ -23,6 +23,8 @@ keyboard and the mailbox are separate sources, and the same wrapper drains both.
   (:use editor/display)  ; render-op constructors: frame / clear / text / cursor / bar
   (:use editor/face))  ; named text faces (:ui/header, :ui/dim, …)
 
+(require 'editor/lineedit)  ; the pure emacs-style line editor driving the input line
+
 (require 'editor/highlight)  ; reuse the stdlib's longest-common-prefix completion helper
 
 (def *commands* ["/connect " "/say-hi" "/run " "/nodes" "/quit"])
@@ -77,11 +79,16 @@ stringifies with (`:alice@host` → `\"alice@host\"`); a string passes through."
 
 ;; --- the model --------------------------------------------------------------
 
+(defn chat--fresh-edit (history)
+  "A fresh lineedit state for the input line, seeded with the newest-first message
+`history` (↑/↓ and C-r recall earlier sends)."
+  (editor/lineedit/lineedit--init "› " "" history))
+
 (defn chat-init (name)
-  "The starting model: this node's `name`, an empty input buffer, and a seeded log.
-`:tick-ms` is the refresh beat (also how often peer traffic is drained when idle)."
+  "The starting model: this node's `name`, a fresh input-line editor, and a seeded
+log. `:tick-ms` is the refresh beat (also how often peer traffic is drained when idle)."
   {:name name
-   :input ""
+   :edit (chat--fresh-edit '())
    :log [{:kind :system
           :text (str "welcome, " name " — Tab completes · Enter sends · /connect a peer to begin")}]
    :tick-ms 250
@@ -125,75 +132,82 @@ to our own inbox produces the \"connected\" log line on the next poll, via handl
       m)
     (catch e (chat--log m {:kind :system :text (str "connect failed: " (pr-str e))}))))
 
-(defn chat--submit (m)
-  "Run the completed input line: a /command, or a chat message broadcast to peers
-(and echoed into our own log). Returns the next model with the buffer cleared."
-  (let (line (get m :input)
-        m2 (assoc m :input ""))
-    (cond
-      (blank? line) m2
-      (= line "/quit") (assoc m2 :done true)
-      (= line "/nodes") (chat--log m2
-                          {:kind :system :text (str "connected: " (chat--names (nodes)))})
-      (= line "/say-hi") (do
-                           (chat--say-hi)
-                           (chat--log m2
-                             {:kind :system :text "shipped /say-hi closure to all peers"}))
-      (starts-with? line "/connect ") (chat--do-connect m2 (chat--rest-after line))
-      (starts-with? line "/run ") (do
-                                    (chat--run-expr (chat--rest-after line))
-                                    (chat--log m2
-                                      {:kind :system
-                                       :text (str "shipped closure: " (chat--rest-after line))}))
-      :else (do
-              (chat--broadcast [:chat (node-name) line])
-              (chat--log m2 {:kind :me :text line})))))
+(defn chat--submit (m line)
+  "Run the completed input `line`: a /command, or a chat message broadcast to peers
+(and echoed into our own log). The caller has already reset the input editor."
+  (cond
+    (blank? line) m
+    (= line "/quit") (assoc m :done true)
+    (= line "/nodes") (chat--log m
+                        {:kind :system :text (str "connected: " (chat--names (nodes)))})
+    (= line "/say-hi") (do
+                         (chat--say-hi)
+                         (chat--log m
+                           {:kind :system :text "shipped /say-hi closure to all peers"}))
+    (starts-with? line "/connect ") (chat--do-connect m (chat--rest-after line))
+    (starts-with? line "/run ") (do
+                                  (chat--run-expr (chat--rest-after line))
+                                  (chat--log m
+                                    {:kind :system
+                                     :text (str "shipped closure: " (chat--rest-after line))}))
+    :else (do
+            (chat--broadcast [:chat (node-name) line])
+            (chat--log m {:kind :me :text line}))))
 
 ;; --- Tab completion ---------------------------------------------------------
+
+(defn chat--set-text (edit s)
+  "The lineedit state `edit` with its line replaced by `s`, point at the end."
+  (assoc edit :text s :point (string-length s) :hist-idx -1))
 
 (defn chat--complete (m)
   "Autocomplete the input against the command list. A unique hit fills it in; a
 shared prefix fills as far as it can and lists the candidates in the log."
-  (let (buf (get m :input)
+  (let (edit (get m :edit)
+        buf (get edit :text)
         ms (filter (fn (c) (starts-with? c buf)) *commands*))
     (cond
       (empty? ms) m
-      (= (count ms) 1) (assoc m :input (first ms))
-      :else (chat--log (assoc m :input (editor/highlight/common-prefix ms))
+      (= (count ms) 1) (assoc m :edit (chat--set-text edit (first ms)))
+      :else (chat--log (assoc m :edit (chat--set-text edit (editor/highlight/common-prefix ms)))
               {:kind :system :text (str "matches: " (join "   " ms))}))))
 
 ;; --- input classification ---------------------------------------------------
 
-(defn chat--printable? (k)
-  "A printable key is a 1-char string."
-  (and (string? k) (= (string-length k) 1)))
 (defn chat--enter? (k)
   "Treat Enter and its raw-mode aliases alike."
   (or (= k :enter) (= k :ctrl-j) (= k :ctrl-m)))
-(defn chat--quit? (k)
-  "Keys that end the session."
-  (or (= k :ctrl-c) (= k :ctrl-d) (= k :escape) (= k :close)))
 (defn chat--peer? (x)
   "Did the frontend hand us a wrapped peer message?"
   (and (vector? x) (= (first x) :peer)))
-(defn chat--backspace (s)
-  "Drop the last char of `s`."
-  (if (empty? s) s (substring s 0 (- (string-length s) 1))))
+
+(defn chat--edit-key (m key)
+  "Fold one editing key into the input line via lineedit (cursor motion, kill-ring,
+word motion, ↑/↓ history, C-r reverse-search — the full emacs keymap). On `:submit`
+run the line and reset the editor (remembering it in history); `:cancel` (C-c) and
+`:eof` (C-d on an empty line) quit — mid-line C-d deletes forward, readline-style."
+  (let (edit (editor/lineedit/lineedit--handle (get m :edit) key)
+        done (get edit :done))
+    (cond
+      (= done :submit) (let (line (get edit :text)
+                             hist (editor/lineedit/lineedit--remember (get edit :hist) line))
+                         (chat--submit (assoc m :edit (chat--fresh-edit hist)) line))
+      (nil? done) (assoc m :edit edit)
+      :else (assoc m :done true))))
 
 (defn chat-update (m input cols rows)
-  "ui-run update: fold one input into the next model. Printables extend the buffer,
-Backspace trims it, Tab completes, Enter submits, Ctrl-C/Ctrl-D/Esc quit, and a
-`[:peer msg]` (peer traffic surfaced by `chat--with-peers`) is handled in place.
-`:tick` and anything else (mouse, resize) are no-ops."
+  "ui-run update: fold one input into the next model. Tab completes against the
+command list, Esc quits, a `[:peer msg]` (peer traffic surfaced by
+`chat--with-peers`) is handled in place, and every other key drives the lineedit
+input line (`chat--edit-key`) — typing, motion, kill/yank, history, reverse-search,
+Enter submit, C-c / empty-line C-d quit. `:tick` and unbound keys are no-ops."
   (cond
     (= input :tick) m
-    (chat--printable? input) (assoc m :input (str (get m :input) input))
-    (= input :backspace) (assoc m :input (chat--backspace (get m :input)))
-    (= input :tab) (chat--complete m)
-    (chat--enter? input) (chat--submit m)
-    (chat--quit? input) (assoc m :done true)
     (chat--peer? input) (chat--handle-peer m (nth input 1))
-    :else m))
+    (or (= input :escape) (= input :close)) (assoc m :done true)
+    (= input :tab) (chat--complete m)
+    (chat--enter? input) (chat--edit-key m :enter)
+    :else (chat--edit-key m input)))
 
 ;; --- view (pure: model + size → a render frame) -----------------------------
 
@@ -247,8 +261,11 @@ peers left with a coloured name chip, results in magenta, system notes centred/d
 
 (defn chat-view (m cols rows)
   "ui-run view: a header bar, the message log (newest pinned to the bottom), a hint
-bar, and the input prompt with the cursor at the end of the buffer. Pure."
-  (let (input (get m :input)
+bar, and the input prompt with the cursor at point (mid-line edits show where they
+land; reverse-search shows its own `(reverse-i-search)` prompt). Pure."
+  (let (edit (get m :edit)
+        input (get edit :text)
+        ptxt (editor/lineedit/lineedit--display-prompt edit)
         log-h (max 0 (- rows 3))  ; log occupies rows 1 .. rows-3
         shown (take-last log-h (get m :log))
         base (- rows 2 (count shown))  ; bottom-align the visible slice
@@ -260,8 +277,8 @@ bar, and the input prompt with the cursor at the end of the buffer. Pure."
               " peer"
               (if (= peers 1) "" "s")
               " connected")
-        hint " Tab complete · Enter send · /connect ⟨name⟩ · /say-hi · /run ⟨expr⟩ · /nodes · Ctrl-C quit"
-        prompt (str "› " input))
+        hint " Tab complete · Enter send · ↑/C-r history · /connect ⟨name⟩ · /say-hi · /run ⟨expr⟩ · /nodes · Ctrl-C quit"
+        prompt (str ptxt input))
     (apply frame
       (concat [(clear) (bar 0 cols hdr {:face {:bg :blue :fg :white :bold true}})]
         (chat--entries-ops shown base cols)
@@ -269,7 +286,8 @@ bar, and the input prompt with the cursor at the end of the buffer. Pure."
                                                              0
                                                              (chat--clamp prompt cols)
                                                              {:bold true})
-          (cursor (- rows 1) (min (- cols 1) (+ 2 (string-length input))))]))))
+          (cursor (- rows 1)
+            (min (- cols 1) (+ (string-length ptxt) (get edit :point))))]))))
 
 ;; --- the peer-traffic frontend wrapper --------------------------------------
 

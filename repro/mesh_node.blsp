@@ -21,9 +21,9 @@
   (if (>= (now) deadline)
     m
     (drain (receive
-             ([:chat from text] (chat/chat--handle-peer (chat/chat--reconcile m) [:chat from text]))
-             ([:action from text] (chat/chat--handle-peer (chat/chat--reconcile m)
-                                    [:action from text]))
+             ([:chat p] (chat/chat--handle-peer (chat/chat--reconcile m) [:chat p]))
+             ([:action p] (chat/chat--handle-peer (chat/chat--reconcile m) [:action p]))
+             ([:dm p] (chat/chat--handle-peer (chat/chat--reconcile m) [:dm p]))
              ([:want-history from] (chat/chat--handle-peer (chat/chat--reconcile m)
                                      [:want-history from]))
              ([:history entries] (chat/chat--handle-peer (chat/chat--reconcile m)

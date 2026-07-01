@@ -50,7 +50,10 @@ each, giving them different node names — say `alice` and `bob`. Then from `ali
 
 ```
 /connect bob        # link to the peer named "bob" (or alice@host:port for remote)
-hello!              # any plain line is broadcast to every connected peer
+hello @ada!         # a plain line is broadcast; @ada pings ada (bell + badge)
+/join #dev          # switch to (or create) a channel — the view filters by room
+/rooms              # list the rooms you've seen
+/msg ada psst       # a PRIVATE line sent to just ada's node, not the room
 /nick ada           # change the name shown on your messages
 /me waves           # send an action ("✦ ada waves")
 /say-hi             # ship a closure that greets you, computed on the peer
@@ -63,11 +66,18 @@ hello!              # any plain line is broadcast to every connected peer
 
 Add a third runtime (`carol`) and `/connect alice` from it — the transitive mesh
 links `carol` to `bob` too, so all three land in one room and every message reaches
-everyone. `carol` also backfills the messages sent before it joined. Each line carries
-a wall-clock timestamp in the left gutter, long lines word-wrap, and **PgUp/PgDn** (or
-the mouse wheel) scroll the backlog — sending a line snaps back to live. Nothing you can
-type or receive crashes the session: `chat-update` catches every error and turns it into
-a log note, so a malformed `/run` or a garbled peer message is survived, not fatal.
+everyone. `carol` also backfills the messages sent before it joined, reassembled in a
+consistent order via **Lamport clocks** (and a line it hears live then again via backfill
+is de-duplicated). Rooms (`/join`) and private messages (`/msg`) ride the same mesh;
+an `@nick` mention or any DM rings a quiet bell and lights a `🔔` badge — but only when
+you'd miss it (window unfocused, scrolled away, or in another room), so a line you're
+looking right at stays silent. A `▼ N new` marker shows how far behind you are while
+scrolled up. The conversation is **saved** to `~/.local/share/broodchat/<node>.log`
+(writes batched on a timer, flushed on quit) and reloaded on restart. Each line carries a
+wall-clock timestamp in the left gutter, long lines word-wrap, and **PgUp/PgDn** (or the
+mouse wheel) scroll the backlog — sending a line snaps back to live. Nothing you can type
+or receive crashes the session: `chat-update` catches every error and turns it into a log
+note, so a malformed `/run` or a garbled peer message is survived, not fatal.
 
 ### Across machines
 
@@ -99,13 +109,14 @@ make check     # the full gate: unit tests + all networked repros
 nest test      # just the fast unit tests
 ```
 
-`tests/chat_test.blsp` (52 tests) covers the pure core — the model, the `chat-update`
+`tests/chat_test.blsp` (73 tests) covers the pure core — the model, the `chat-update`
 folds, command dispatch, presence (mesh → `:peers`) diffing, `/nick` / `/me` / `/tz` /
-timestamps, history backfill, resilience (malformed `/run`, garbled history, connect
-guards, never-throws), scrollback, node-identity + launch-arg parsing, word-wrap, Tab
-completion, and the view helpers. The networked paths need live nodes, so three shell
-regressions (run together by `repro/all.sh`, or `make repro`) drive real `nest run`
-processes:
+timestamps, rooms (`/join` + view filtering), private messages (`/msg`), mentions /
+unread / attention, Lamport ordering + de-dup, history backfill, persistence (restore /
+load), resilience (malformed `/run`, garbled history, connect guards, never-throws),
+scrollback, node-identity + launch-arg parsing, word-wrap, Tab completion, and the view
+helpers. The networked paths need live nodes, so three shell regressions (run together by
+`repro/all.sh`, or `make repro`) drive real `nest run` processes:
 
 - `repro/mesh.sh` — three local nodes where B and C each `/connect` only A; asserts
   the transitive mesh still puts all three in one room (each sees two peers and holds

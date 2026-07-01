@@ -10,9 +10,10 @@ type. Slash-commands ship *closures* over the wire (`/run`, `/say-hi`).
 - `src/chat.blsp`   — the whole app: model, `chat-update`, pure `chat-view`, the
   peer-traffic frontend wrapper, and `main` (the `:main` entry point).
 - `tests/chat_test.blsp` — covers the pure core (model/update/view/commands, presence
-  diffing, `/nick` `/me` `/tz` timestamps, rooms/`/join`, DMs/`/msg`, mentions+unread,
-  Lamport ordering+dedup, history backfill, persistence restore/load, resilience/never-
-  throws, scrollback, node-identity + launch-arg parsing, word-wrap). The networked paths need
+  diffing, `/nick` `/me` `/tz` timestamps, rooms/`/join`, DMs/`/msg`, mentions+unread
+  (focus-gated), Lamport ordering+dedup, history backfill, persistence restore/load,
+  roster/rooms sidebar, message grouping, relative time, resilience/never-throws,
+  scrollback, node-identity + launch-arg parsing, word-wrap). The networked paths need
   live nodes; the `repro/` scripts drive real `nest run` processes over the actual chat
   module (`repro/mesh_node.blsp` is a faithful mini `ui-run` — reconcile-on-tick + fold
   peer traffic into one threaded model). The repros **stagger** node starts and measure

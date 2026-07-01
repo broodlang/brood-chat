@@ -72,8 +72,12 @@ is de-duplicated). Rooms (`/join`) and private messages (`/msg`) ride the same m
 an `@nick` mention or any DM rings a quiet bell and lights a `🔔` badge — but only when
 you'd miss it (window unfocused, scrolled away, or in another room), so a line you're
 looking right at stays silent. A `▼ N new` marker shows how far behind you are while
-scrolled up. The conversation is **saved** to `~/.local/share/broodchat/<node>.log`
-(writes batched on a timer, flushed on quit) and reloaded on restart. Each line carries a
+scrolled up. A right-hand panel shows the **roster** (you + peers in their accent
+colours) and your **rooms** (current one marked, others with an unread dot), and it
+auto-hides on a narrow terminal. Consecutive lines from one sender are **grouped**
+(the name is shown once) and timestamps show **relative time** ("2m", "1h"). The
+conversation is **saved** to `~/.local/share/broodchat/<node>.log` (writes batched on a
+timer, flushed on quit) and reloaded on restart. Each line carries a
 wall-clock timestamp in the left gutter, long lines word-wrap, and **PgUp/PgDn** (or the
 mouse wheel) scroll the backlog — sending a line snaps back to live. Nothing you can type
 or receive crashes the session: `chat-update` catches every error and turns it into a log
@@ -109,11 +113,12 @@ make check     # the full gate: unit tests + all networked repros
 nest test      # just the fast unit tests
 ```
 
-`tests/chat_test.blsp` (73 tests) covers the pure core — the model, the `chat-update`
+`tests/chat_test.blsp` (81 tests) covers the pure core — the model, the `chat-update`
 folds, command dispatch, presence (mesh → `:peers`) diffing, `/nick` / `/me` / `/tz` /
 timestamps, rooms (`/join` + view filtering), private messages (`/msg`), mentions /
-unread / attention, Lamport ordering + de-dup, history backfill, persistence (restore /
-load), resilience (malformed `/run`, garbled history, connect guards, never-throws),
+unread / attention (focus-gated), Lamport ordering + de-dup, history backfill,
+persistence (restore / load), the roster/rooms sidebar, message grouping, relative
+timestamps, resilience (malformed `/run`, garbled history, connect guards, never-throws),
 scrollback, node-identity + launch-arg parsing, word-wrap, Tab completion, and the view
 helpers. The networked paths need live nodes, so three shell regressions (run together by
 `repro/all.sh`, or `make repro`) drive real `nest run` processes:

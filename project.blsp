@@ -1,10 +1,8 @@
 ;; chat — a distributed chat app over Brood's nodes (GUI window or terminal TUI).
-(project :name
-  "chat"
-  :version
-  "0.1.0"
-  :main
-  chat)
+(project
+  :name "chat"
+  :version "0.1.0"
+  :main chat)
 
 ;; To depend on other Brood packages, add a :dependencies vector to the form
 ;; above (ADR-037). Dep names are bare symbols (no quoting):

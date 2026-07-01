@@ -1,0 +1,62 @@
+;; repro/mesh_node.blsp — one node of the mesh / cross-machine / history regressions.
+;;
+;; Drives the REAL chat module through a faithful mini `ui-run`: it registers as the
+;; :inbox, reconciles the mesh on every tick and folds incoming peer traffic
+;; (chat / action / history) into one threaded model — exactly what the app's loop
+;; does, minus the frontend. So presence, broadcast AND history backfill all land in
+;; the model and can be asserted. Parametrised by env:
+;;   NODE=name            this node's name
+;;   LISTEN=host:port     (optional) start a TCP node instead of a local Unix one
+;;   DIAL=name[@host:port] (optional) the single peer to /connect — the cluster entry
+;;   SAY=text             a line broadcast once the mesh has converged
+;;   PRECHAT=a|b|c        (optional) lines said *before* dialing — a late joiner can
+;;                        only receive these via history backfill
+;;
+;; Prints one machine-checkable line: RESULT <me> peers=<n> conv=<n>  (conv = chat +
+;; action lines in the model), then every conversational line for eyeball/grep checks.
+(require 'chat)
+
+(defn drain (m deadline)
+  "Reconcile + fold peer traffic until `deadline` (epoch-ms), mirroring the real loop."
+  (if (>= (now) deadline)
+    m
+    (drain (receive
+             ([:chat from text] (chat/chat--handle-peer (chat/chat--reconcile m) [:chat from text]))
+             ([:action from text] (chat/chat--handle-peer (chat/chat--reconcile m)
+                                    [:action from text]))
+             ([:want-history from] (chat/chat--handle-peer (chat/chat--reconcile m)
+                                     [:want-history from]))
+             ([:history entries] (chat/chat--handle-peer (chat/chat--reconcile m)
+                                   [:history entries]))
+             (after 200 (chat/chat--reconcile m)))
+      deadline)))
+
+(defn conv (m)
+  "The conversational (chat/action) lines of the model log."
+  (filter (fn (e) (member? (get e :kind) [:me :them :action])) (get m :log)))
+
+(let (me (getenv "NODE")
+      listen (getenv "LISTEN")
+      dial (getenv "DIAL")
+      say (getenv "SAY")
+      prechat (getenv "PRECHAT"))
+  (if (and listen (not (blank? listen))) (node-start me listen) (node-start me))
+  (register :inbox (self))
+  ; readiness marker for the repro runner
+  (println (str "READY " me))
+  (let (m0 (chat/chat-init me)
+        m1 (if (and prechat (not (blank? prechat)))
+             (fold (fn (mm ln) (chat/chat--submit mm ln)) m0 (string-split prechat "|"))
+             m0)
+        m2 (if (and dial (not (blank? dial))) (chat/chat--do-connect m1 dial) m1)
+        ; converge + backfill
+        m3 (drain m2 (+ (now) 2600))
+        ; measure peers here — every node is still alive; staggered exits later would
+        ; otherwise drop a late node's peers as earlier nodes finish and leave.
+        peers (count (get m3 :peers))
+        m4 (if (and say (not (blank? say))) (chat/chat--submit m3 say) m3)
+        m5 (drain m4 (+ (now) 2000)))
+    ; hear everyone's live lines
+    (println (str "RESULT " me " peers=" peers " conv=" (count (conv m5))))
+    (doseq (e (conv m5))
+      (println (str "  [" (get e :kind) "] " (or (get e :from) "you") ": " (get e :text))))))

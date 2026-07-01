@@ -9,18 +9,35 @@ type. Slash-commands ship *closures* over the wire (`/run`, `/say-hi`).
 
 - `src/chat.blsp`   — the whole app: model, `chat-update`, pure `chat-view`, the
   peer-traffic frontend wrapper, and `main` (the `:main` entry point).
-- `tests/chat_test.blsp` — covers the pure core (model/update/view/commands).
-  The networked paths need two live nodes; `repro/run.sh` is that regression.
-- `repro/`          — a two-node clean-disconnect (`[:nodedown]`) regression.
+- `tests/chat_test.blsp` — covers the pure core (model/update/view/commands, presence
+  diffing, `/nick` `/me` `/tz` timestamps, history backfill, resilience/never-throws,
+  scrollback, node-identity + launch-arg parsing, word-wrap). The networked paths need
+  live nodes; the `repro/` scripts drive real `nest run` processes over the actual chat
+  module (`repro/mesh_node.blsp` is a faithful mini `ui-run` — reconcile-on-tick + fold
+  peer traffic into one threaded model). The repros **stagger** node starts and measure
+  `:peers` at convergence (before nodes exit) — a simultaneous double-join races the
+  mesh gossip, and a late node would otherwise see earlier nodes leave.
+- `repro/mesh.sh`   — three-node transitive-mesh (ADR-088) group-chat regression:
+  B and C dial only A, yet all three end up in one room. The "everyone sees everyone"
+  guarantee (asserts `peers=2 conv=3` each).
+- `repro/tcp.sh`    — the same over TCP (loopback = the cross-machine path); A chats
+  before B/C join, so it also asserts late joiners **backfill** the missed history.
+- `repro/run.sh`    — a two-node clean-disconnect (`[:nodedown]`) regression.
 - `docs/`           — `brood-for-claude.md` (language reference) and
   `findings.md` (the resolved log from first building this app).
 
 ## Running
 
+- `make check`  — the full gate: `nest test` + all networked repros (`repro/all.sh`).
+  Use this before declaring done. `make test` / `make repro` / `make fmt` / `make run`
+  are the pieces.
 - `nest test`   — run the test suite (each test runs in its own green process).
 - `nest run`    — launch the chat app (`:main chat` in `project.blsp` → `chat/main`).
-  It prompts for a frontend (`g`/`t`) and a node name; pass `gui`/`tui` as an arg
-  to skip the frontend prompt (`nest run gui`).
+  It prompts for a frontend (`g`/`t`) and a node name; pass `gui`/`tui` (or a
+  `name`/`name@host:port`) as args to skip the prompts. `nest run --name NAME` (the
+  daemon model) pre-starts the node and the app adopts it — pick the frontend with a
+  `tui`/`gui` word or `-- --with-tui` (a bare `--with-tui` is rejected by nest's parser
+  when there's no FILE).
   Each module is a namespace (ADR-065): a file's `defmodule name` makes its
   `def`/`defn` define `name/foo`; a bare reference resolves in the current
   namespace, then through `(:use …)` imports, then root/prelude. The `chat--`

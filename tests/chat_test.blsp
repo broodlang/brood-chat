@@ -109,8 +109,9 @@
     (assert= (input-text (chat-update (type-line (chat-init "a") "/zzz") :tab 80 24)) "/zzz")))
 
 (describe "chat: incoming peer messages"
-  (test "[:chat from text] becomes a :them entry tagged with the sender"
-    (let (m (chat/chat--handle-peer (chat-init "a") [:chat :bob "hi"]))
+  ;; conversational shapes are map payloads: [:chat {:from :text :room :lc :at}], etc.
+  (test "[:chat …] becomes a :them entry tagged with the sender"
+    (let (m (chat/chat--handle-peer (chat-init "a") [:chat {:from :bob :text "hi" :lc 1}]))
       (assert= (get (last-entry m) :kind) :them)
       ; node keyword shown without its colon
       (assert= (get (last-entry m) :from) "bob")
@@ -125,22 +126,22 @@
   ;; GUI, whose catch-all poll returns mailbox messages unwrapped). The raw form was the
   ;; group-chat bug — GUI peers connected but never saw each other's lines.
   (test "chat-update handles a WRAPPED peer message (terminal path)"
-    (let (m (chat-update (chat-init "a") [:peer [:chat :bob "hi there"]] 80 24))
+    (let (m (chat-update (chat-init "a") [:peer [:chat {:from :bob :text "hi there" :lc 1}]] 80 24))
       (assert= (get (last-entry m) :kind) :them)
       (assert= (get (last-entry m) :text) "hi there")))
 
   (test "chat-update handles a RAW peer message (GUI path — the group-chat fix)"
-    (let (m (chat-update (chat-init "a") [:chat :bob "gui line"] 80 24))
+    (let (m (chat-update (chat-init "a") [:chat {:from :bob :text "gui line" :lc 1}] 80 24))
       (assert= (get (last-entry m) :kind) :them)
       (assert= (get (last-entry m) :from) "bob")
       (assert= (get (last-entry m) :text) "gui line")))
 
   (test "a raw [:action …] and [:history …] also route through (GUI path)"
-    (let (m (chat-update (chat-init "a") [:action :bob "waves"] 80 24))
+    (let (m (chat-update (chat-init "a") [:action {:from :bob :text "waves" :lc 1}] 80 24))
       (assert= (get (last-entry m) :kind) :action))
     ;; a raw history dump is folded (backfilled), not treated as a keystroke
     (let (m (chat-update (chat-init "a")
-              [:history [{:from "z" :text "earlier" :at "1" :act false}]]
+              [:history [{:from "z" :text "earlier" :lc 1 :at 1}]]
               80
               24))
       (assert= (get m :backfilled) true)))
@@ -150,8 +151,9 @@
     (is (nil? (chat/chat--peer-msg "a")))
     (is (nil? (chat/chat--peer-msg :up)))
     (is (nil? (chat/chat--peer-msg [:mouse :scroll-up 0 0])))
-    (assert= (chat/chat--peer-msg [:peer [:chat :b "x"]]) [:chat :b "x"])
-    (assert= (chat/chat--peer-msg [:chat :b "x"]) [:chat :b "x"])))
+    (assert= (chat/chat--peer-msg [:peer [:chat {:from :b :text "x"}]])
+      [:chat {:from :b :text "x"}])
+    (assert= (chat/chat--peer-msg [:dm {:from :b :text "x"}]) [:dm {:from :b :text "x"}])))
 
 (describe "chat: presence (cluster mesh → :peers)"
   ;; chat--reconcile reads live (nodes); its pure diff core chat--sync-peers takes the
@@ -200,7 +202,7 @@
       (is (number? (get (last-entry m) :at)))))
 
   (test "an incoming action becomes an :action entry"
-    (let (m (chat/chat--handle-peer (chat-init "a") [:action :bob "shrugs"]))
+    (let (m (chat/chat--handle-peer (chat-init "a") [:action {:from :bob :text "shrugs" :lc 1}]))
       (assert= (get (last-entry m) :kind) :action)
       (assert= (get (last-entry m) :from) "bob")))
 
@@ -240,10 +242,10 @@
           m1 (chat/chat--handle-peer (chat-init "alice") [:history recs]))
       (is (get m1 :backfilled))
       (assert= (get (first (get m1 :log)) :text)
-        "welcome, alice — Tab completes · Enter sends · /connect a peer · /help")
+        "welcome, alice — /join a room · /connect a peer · @nick to ping · /help")
       (refute (empty? (filter (fn (e) (= (get e :text) "earlier")) (get m1 :log))))
       ;; a second dump (e.g. from another peer we asked) is ignored
-      (let (m2 (chat/chat--handle-peer m1 [:history [{:from "z" :text "again" :at "1" :act false}]]))
+      (let (m2 (chat/chat--handle-peer m1 [:history [{:from "z" :text "again" :lc 9 :at 1}]]))
         (is (empty? (filter (fn (e) (= (get e :text) "again")) (get m2 :log)))))))
 
   (test "a want-history request leaves our own model unchanged"
@@ -326,6 +328,165 @@
       (assert= (count (get m :log)) 1)
       (assert= (get m :scroll) 0))))
 
+(describe "chat: mentions, unread & attention"
+  (test "mentions? spots an @name case-insensitively; blank name never matches"
+    (is (chat/chat--mentions? "hey @ada, look" "ada"))
+    (is (chat/chat--mentions? "HEY @ADA" "ada"))
+    (refute (chat/chat--mentions? "hello there" "ada"))
+    (refute (chat/chat--mentions? "@ada" "")))
+
+  ; unfocused
+  (test "present? is true only when focused, at the bottom, and viewing that room"
+    (let (m (chat-init "ada"))
+      ; focused, scroll 0, #lobby
+      (is (chat/chat--present? m "#lobby" false))
+      ; a DM shows in any room
+      (is (chat/chat--present? m "#dev" true))
+      ; wrong room
+      (refute (chat/chat--present? m "#dev" false))
+      ; scrolled away
+      (refute (chat/chat--present? (assoc m :scroll 2) "#lobby" false))
+      (refute (chat/chat--present? (assoc m :focused false) "#lobby" false))))
+  (test "an @-mention pings ONLY when you wouldn't already see it"
+    ;; present (focused, bottom, same room) → no badge; you're looking right at it
+    (let (m (chat/chat--handle-peer (chat-init "ada") [:chat {:from :bob :text "ping @ada" :lc 1}]))
+      (assert= (get m :mentions) 0))
+    ;; unfocused → badge
+    (let (away (chat/chat-update (chat-init "ada") :blur 80 24)
+          m (chat/chat--handle-peer away [:chat {:from :bob :text "ping @ada" :lc 1}]))
+      (assert= (get m :mentions) 1))
+    ;; a non-mention never pings
+    (let (away (chat/chat-update (chat-init "ada") :blur 80 24)
+          m (chat/chat--handle-peer away [:chat {:from :bob :text "hello all" :lc 1}]))
+      (assert= (get m :mentions) 0)))
+
+  (test ":blur drops focus; any keystroke regains it (GUI focus tracking)"
+    (let (m (chat-update (chat-init "a") :blur 80 24))
+      (refute (get m :focused))
+      (is (get (chat-update m "x" 80 24) :focused))))
+
+  (test "a line arriving while scrolled up increments unread; catching up clears it"
+    (let (up (assoc (chat-init "a") :scroll 3)
+          m1 (chat/chat--handle-peer up [:chat {:from :bob :text "hi" :lc 1}]))
+      (assert= (get m1 :unread) 1)
+      ;; scrolling back to the bottom clears unread + mentions
+      (let (m2 (chat/chat--scroll (assoc m1 :mentions 2) -999))
+        (assert= (get m2 :scroll) 0)
+        (assert= (get m2 :unread) 0)
+        (assert= (get m2 :mentions) 0)))))
+
+(describe "chat: rooms"
+  (test "/join switches room, registers it, and pins to the bottom"
+    (let (m (chat/chat--submit (assoc (chat-init "a") :scroll 5) "/join #dev"))
+      (assert= (get m :room) "#dev")
+      (is (member? "#dev" (get m :rooms)))
+      (assert= (get m :scroll) 0)))
+
+  (test "a bare room name gains a leading # and is case-folded"
+    (assert= (chat/chat--room-name "Dev") "#dev")
+    (assert= (chat/chat--room-name "  #Ops ") "#ops"))
+
+  (test "a sent line is tagged with the current room; the view filters by room"
+    (let (m (chat/chat--submit (assoc (chat-init "a") :room "#dev") "hi dev"))
+      (assert= (get (last-entry m) :room) "#dev")
+      ; a #dev line is hidden while you're in #lobby, shown while in #dev
+      (refute (chat/chat--visible? (last-entry m) "#lobby"))
+      (is (chat/chat--visible? (last-entry m) "#dev"))
+      ; system/DM entries show in any room
+      (is (chat/chat--visible? {:kind :system :text "x"} "#lobby"))))
+
+  (test "/rooms lists the rooms seen"
+    (let (m (chat/chat--submit (assoc (chat-init "a") :rooms ["#lobby" "#dev"]) "/rooms"))
+      (is (string-contains? (get (last-entry m) :text) "#dev")))))
+
+(describe "chat: private messages (/msg)"
+  (test "/msg to a connected peer logs a :dm-out addressed to them"
+    (let (m (chat/chat--submit (assoc (chat-init "a") :peers [:bob@host]) "/msg bob psst"))
+      (assert= (get (last-entry m) :kind) :dm-out)
+      (assert= (get (last-entry m) :from) "bob")
+      (assert= (get (last-entry m) :text) "psst")))
+
+  (test "/msg to an unknown nick is a friendly note, not a send"
+    (let (m (chat/chat--submit (assoc (chat-init "a") :peers [:bob@host]) "/msg nobody hi"))
+      (assert= (get (last-entry m) :kind) :system)
+      (is (string-contains? (get (last-entry m) :text) "no connected peer"))))
+
+  (test "an incoming [:dm …] logs a :dm-in and pings when you're not looking"
+    ;; present → logged, no badge
+    (let (m (chat/chat--handle-peer (chat-init "a") [:dm {:from :bob :text "hey" :lc 1}]))
+      (assert= (get (last-entry m) :kind) :dm-in)
+      (assert= (get (last-entry m) :from) "bob")
+      (assert= (get m :mentions) 0))
+    ;; unfocused → badge
+    (let (away (chat/chat-update (chat-init "a") :blur 80 24)
+          m (chat/chat--handle-peer away [:dm {:from :bob :text "hey" :lc 1}]))
+      (assert= (get m :mentions) 1)))
+
+  (test "a DM is never replayed in history (private)"
+    (let (m (assoc (chat-init "a")
+              :log [{:kind :system :text "w"} {:kind :dm-in :from "bob" :text "secret" :lc 1}
+                     {:kind :me :text "public" :room "#lobby" :lc 2}])
+          hs (chat/chat--history-entries m))
+      (assert= (count hs) 1)
+      (assert= (get (first hs) :text) "public"))))
+
+(describe "chat: ordering & persistence"
+  (test "Lamport clock advances on send and jumps past a peer's on receive"
+    (let (m1 (chat/chat--submit (chat-init "a") "one")
+          m2 (chat/chat--handle-peer m1 [:chat {:from :bob :text "two" :lc 50}]))
+      (assert= (get m1 :lc) 1)
+      ; observed 50 → ours becomes 51
+      (assert= (get m2 :lc) 51)))
+
+  (test "backfill dedupes already-seen ids and orders the rest by Lamport clock"
+    (let (seeded (chat/chat--remember (chat-init "a") (chat/chat--id "bob" 2))
+          m (chat/chat--backfill seeded
+              [{:from "z" :text "later" :lc 5 :room "#lobby"} {:from "a"
+                                                               :text "early"
+                                                               :lc 1
+                                                               :room "#lobby"}
+                {:from "bob" :text "dup" :lc 2 :room "#lobby"}])
+          texts (into [] (map (fn (e) (get e :text)) (filter chat/chat--public? (get m :log)))))
+      ; "dup" (id bob|2) skipped; the rest sorted 1,5
+      (assert= texts ["early" "later"])))
+
+  (test "a live line then its history echo collapse to one (id dedupe)"
+    (let (live (chat/chat--handle-peer (chat-init "a") [:chat {:from :bob :text "hi" :lc 7}])
+          n (count (filter (fn (e) (= (get e :kind) :them)) (get live :log)))
+          echo (chat/chat--handle-peer live
+                 [:history [{:from "bob" :text "hi" :lc 7 :room "#lobby"}]])
+          n2 (count (filter (fn (e) (= (get e :kind) :them)) (get echo :log))))
+      (assert= n 1)
+      (assert= n2 1)))
+
+  (test "persistence is batched: a change marks dirty, the tick throttles the write"
+    ;; a received/sent line marks the log dirty rather than writing immediately
+    (let (m (chat/chat--handle-peer (assoc (chat-init "a") :store "/tmp/none")
+              [:chat {:from :bob :text "hi" :lc 1}]))
+      (is (get m :dirty))
+      ;; a write that just happened → maybe-persist! throttles (stays dirty, no I/O)
+      (is (get (chat/chat--maybe-persist! (assoc m :persisted-at (now))) :dirty)))
+    ;; no :store → maybe-persist! and flush! are pure no-ops (tests never touch disk)
+    (is (map? (chat/chat--maybe-persist! (chat-init "a"))))
+    (is (map? (chat/chat--flush! (chat/chat-init "a")))))
+
+  (test "restore splices saved entries back, preserving perspective and advancing the clock"
+    (let (saved [{:kind :me :text "mine" :room "#lobby" :lc 4 :at 1} {:kind :them
+                                                                      :from "bob"
+                                                                      :text "theirs"
+                                                                      :room "#lobby"
+                                                                      :lc 6
+                                                                      :at 2}]
+          m (chat/chat--restore (chat-init "a") saved))
+      (assert= (get m :lc) 6)
+      ; the two lines are present with their original kinds
+      (refute (empty? (filter (fn (e) (and (= (get e :kind) :me) (= (get e :text) "mine")))
+                        (get m :log))))
+      (refute (empty? (filter (fn (e) (= (get e :kind) :them)) (get m :log))))))
+
+  (test "load-entries returns [] for a missing or corrupt file"
+    (assert= (chat/chat--load-entries "/tmp/broodchat-does-not-exist-xyz.log") [])))
+
 (describe "chat: view helpers"
   (test "rest-after returns the argument past the first space"
     (assert= (chat/chat--rest-after "/connect bob") "bob")
@@ -347,8 +508,8 @@
     (assert= (chat/chat--peer-color "bob") (chat/chat--peer-color "bilbo")))
 
   (test "place-vlines lays visual lines on consecutive rows from the base"
-    (let (v0 (chat/chat--entry-vlines {:kind :system :text "x"} 80 0)
-          v1 (chat/chat--entry-vlines {:kind :system :text "y"} 80 0)
+    (let (v0 (chat/chat--entry-vlines {:kind :system :text "x"} 80 0 "")
+          v1 (chat/chat--entry-vlines {:kind :system :text "y"} 80 0 "")
           ops (chat/chat--place-vlines (concat v0 v1) 5))
       (assert= (nth (first ops) 1) 5)
       (assert= (nth (second ops) 1) 6)))
@@ -358,14 +519,15 @@
     ;; 34_200_000 ms = 09:30 UTC; gutter is len(\"09:30\")+1 = 6
     (let (line0 (first (chat/chat--entry-vlines {:kind :them :from "bob" :text "hi" :at 34200000}
                          80
-                         0)))
+                         0
+                         "")))
       ; stamp at col 0
       (assert= (nth (first line0) 2) 0)
       ; formatted, UTC
       (assert= (nth (first line0) 3) "09:30")
       (assert= (nth (second line0) 2) 6)))
   (test "an action renders as ✦ then the name/text body"
-    (let (line0 (first (chat/chat--entry-vlines {:kind :action :from "bob" :text "waves"} 80 0)))
+    (let (line0 (first (chat/chat--entry-vlines {:kind :action :from "bob" :text "waves"} 80 0 "")))
       (assert= (nth (first line0) 3) "✦ ")
       (is (string-contains? (nth (second line0) 3) "bob waves"))))
 
@@ -380,5 +542,6 @@
                                         :text "one two three four five six"
                                         :at nil}
                 20
-                0))
+                0
+                ""))
       (is (> (count vls) 1)))))

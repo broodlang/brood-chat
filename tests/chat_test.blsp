@@ -487,6 +487,75 @@
   (test "load-entries returns [] for a missing or corrupt file"
     (assert= (chat/chat--load-entries "/tmp/broodchat-does-not-exist-xyz.log") [])))
 
+(describe "chat: roster, grouping & relative time"
+  ; no timestamp
+  (test "stamp-str shows relative time from :now, HH:MM when :now is unset"
+    ; 30s ago
+    (assert= (chat/chat--stamp-str 34200000 34230000 0) "  now")
+    ; ~2 min ago
+    (assert= (chat/chat--stamp-str 34200000 34330000 0) "   2m")
+    (assert= (chat/chat--stamp-str 34200000 (+ 34200000 (* 3 3600000)) 0) "   3h")
+    ; :now unset → absolute
+    (assert= (chat/chat--stamp-str 34200000 0 0) "09:30")
+    (assert= (chat/chat--stamp-str nil 34330000 0) ""))
+  (test "consecutive lines from one sender are grouped (chip dropped)"
+    (let (shown [{:kind :them :from "bob" :text "one" :at 1000} {:kind :them
+                                                                 :from "bob"
+                                                                 :text "two"
+                                                                 :at 1500}
+                  {:kind :them :from "cara" :text "hi" :at 1600}]
+          flags (into [] (chat/chat--group-flags shown)))
+      (assert= flags [false true false]))
+    ;; a big time gap breaks the group
+    (let (shown [{:kind :them :from "bob" :text "old" :at 0} {:kind :them
+                                                              :from "bob"
+                                                              :text "new"
+                                                              :at 999999}]
+          flags (into [] (chat/chat--group-flags shown)))
+      (assert= flags [false false])))
+
+  (test "a grouped line blanks the chip but keeps the body column aligned"
+    (let (solo (first (chat/chat--entry-vlines {:kind :them :from "bob" :text "hi" :at nil}
+                        80
+                        0
+                        ""
+                        0
+                        false))
+          grp (first (chat/chat--entry-vlines {:kind :them :from "bob" :text "hi" :at nil}
+                       80
+                       0
+                       ""
+                       0
+                       true))
+          ;; the body op is the last op on the line; its column must match
+          body-col (fn (line) (nth (last line) 2)))
+      (assert= (body-col solo) (body-col grp))))
+
+  ; other room + unread
+  (test "the sidebar lists you + peers and marks the current room with unread dots"
+    (let (m (assoc (chat-init "ada")
+              :peers [:bob@h :cara@h]
+              :room "#dev"
+              :rooms ["#lobby" "#dev"]
+              :room-unread {"#lobby" 3})
+          lines (map (fn (l) (get l :text)) (chat/chat--sidebar-lines m)))
+      (is (member? "● ada  (you)" lines))
+      (is (member? "● bob" lines))
+      ; current room marked
+      (is (member? "▸ #dev" lines))
+      (is (member? "  #lobby  •3" lines))))
+  (test "receiving in another room bumps that room's unread; /join clears it"
+    (let (m (chat/chat--handle-peer (assoc (chat-init "a") :room "#lobby")
+              [:chat {:from :bob :text "hi" :room "#dev" :lc 1}]))
+      (assert= (get (get m :room-unread) "#dev") 1)
+      (let (joined (chat/chat--submit m "/join #dev"))
+        (assert= (get (get joined :room-unread) "#dev") 0))))
+
+  (test "the sidebar hides on a narrow terminal (renders full width)"
+    ;; both widths render a valid frame; the narrow one simply omits the panel
+    (is (vector? (chat-view (chat-init "a") 50 16)))
+    (is (vector? (chat-view (assoc (chat-init "a") :peers [:bob@h]) 90 16)))))
+
 (describe "chat: view helpers"
   (test "rest-after returns the argument past the first space"
     (assert= (chat/chat--rest-after "/connect bob") "bob")
@@ -508,8 +577,8 @@
     (assert= (chat/chat--peer-color "bob") (chat/chat--peer-color "bilbo")))
 
   (test "place-vlines lays visual lines on consecutive rows from the base"
-    (let (v0 (chat/chat--entry-vlines {:kind :system :text "x"} 80 0 "")
-          v1 (chat/chat--entry-vlines {:kind :system :text "y"} 80 0 "")
+    (let (v0 (chat/chat--entry-vlines {:kind :system :text "x"} 80 0 "" 0 false)
+          v1 (chat/chat--entry-vlines {:kind :system :text "y"} 80 0 "" 0 false)
           ops (chat/chat--place-vlines (concat v0 v1) 5))
       (assert= (nth (first ops) 1) 5)
       (assert= (nth (second ops) 1) 6)))
@@ -520,14 +589,21 @@
     (let (line0 (first (chat/chat--entry-vlines {:kind :them :from "bob" :text "hi" :at 34200000}
                          80
                          0
-                         "")))
+                         ""
+                         0
+                         false)))
       ; stamp at col 0
       (assert= (nth (first line0) 2) 0)
-      ; formatted, UTC
+      ; now=0 → falls back to tz-formatted HH:MM (UTC)
       (assert= (nth (first line0) 3) "09:30")
       (assert= (nth (second line0) 2) 6)))
   (test "an action renders as ✦ then the name/text body"
-    (let (line0 (first (chat/chat--entry-vlines {:kind :action :from "bob" :text "waves"} 80 0 "")))
+    (let (line0 (first (chat/chat--entry-vlines {:kind :action :from "bob" :text "waves"}
+                         80
+                         0
+                         ""
+                         0
+                         false)))
       (assert= (nth (first line0) 3) "✦ ")
       (is (string-contains? (nth (second line0) 3) "bob waves"))))
 
@@ -543,5 +619,7 @@
                                         :at nil}
                 20
                 0
-                ""))
+                ""
+                0
+                false))
       (is (> (count vls) 1)))))

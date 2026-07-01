@@ -21,9 +21,13 @@ at stays silent. A `▼ N new` marker counts lines that land while you're scroll
 stamp** so a backfilled history reassembles in the same order on every node and a line
 seen twice (live, then echoed via backfill) is de-duplicated; the conversation is also
 **persisted** to `~/.local/share/broodchat/<node>.log` (writes batched on the tick + a
-final flush on quit) and reloaded on restart. Long lines word-wrap and PgUp/PgDn (or the
-mouse wheel) scroll the backlog. Resilience is a
-property, not an afterthought: `chat-update` is wrapped so **no** input — a malformed peer
+final flush on quit) and reloaded on restart. A right-hand panel shows the **roster**
+(you + connected peers in their accent colours) and the **rooms** (current one marked,
+others with an unread dot) — it auto-hides on a narrow terminal. Consecutive lines from
+one sender are **grouped** (name chip dropped) and stamps show **relative time** (2m, 1h)
+off the model's `:now`. Long lines word-wrap and PgUp/PgDn (or the mouse wheel) scroll the
+backlog. Resilience is a property, not an afterthought: `chat-update` is wrapped so **no**
+input — a malformed peer
 message, a bad `/run`, a garbled history dump — can crash the session; the worst case is a
 logged note. `nest run --name NAME` (the daemon model) is adopted as the node identity
 when present, else you name it at startup.
@@ -165,6 +169,14 @@ bottom, sent a line, or switched rooms)."
 batched (`chat--maybe-persist!`), so a burst of messages costs one write, not one each."
   (assoc m :dirty true))
 
+(defn chat--bump-room-unread (m room)
+  "Count one unseen line for `room` (shown as a dot in the sidebar's room list). Left
+cleared for the room you're currently in — you're reading it."
+  (if (= room (get m :room))
+    m
+    (let (ru (get m :room-unread {}))
+      (assoc m :room-unread (assoc ru room (+ 1 (get ru room 0)))))))
+
 (defn chat--present? (m room dm?)
   "Would a message for `room` (or a DM, when `dm?`) already be on your screen — the window
 is focused, you're pinned to the live bottom, and (for a room line) you're viewing that
@@ -266,8 +278,10 @@ flushed to disk (see `chat--reconcile` / `chat--maybe-persist!`)."
    :tz-offset 0
    :room *default-room*
    :rooms [*default-room*]
+   :room-unread {}
    :unread 0
    :mentions 0
+   :now 0
    :lc 0
    :seen []
    :focused true
@@ -394,7 +408,7 @@ it, and on an @-mention of us ring the bell + bump the badge. Persists the resul
             m3 (if (and (chat--mentions? text (get m2 :name)) (not (chat--present? m2 room false)))
                  (do (chat--bell) (assoc m2 :mentions (+ 1 (get m2 :mentions 0))))
                  m2))
-        (chat--mark-dirty m3)))))
+        (chat--mark-dirty (chat--bump-room-unread m3 room))))))
 
 (defn chat--recv-dm (m p)
   "Fold a received private message map `p` as a `:dm-in` — always an alert (bell + badge),
@@ -542,8 +556,10 @@ friendly usage note. The local echo is a `:dm-out`; the recipient logs a `:dm-in
 so the new room starts fresh; the room is registered so `/rooms` lists it."
   (if (blank? arg)
     (chat--log m {:kind :system :text "usage: /join ⟨#room⟩"})
-    (let (room (chat--room-name arg))
-      (chat--log (chat--see-room (chat--clear-alerts (assoc m :room room :scroll 0)) room)
+    (let (room (chat--room-name arg)
+          ru (assoc (get m :room-unread {}) room 0))
+      (chat--log (chat--see-room (chat--clear-alerts (assoc m :room room :scroll 0 :room-unread ru))
+                   room)
         {:kind :system :text (str "now in " room)}))))
 
 (defn chat--parse-tz (s)
@@ -697,7 +713,9 @@ model is kept. On quit, any pending write is flushed."
                          (or (= input :tick) (not (nil? pm))) m
                          :else (assoc m :focused true)))
                  (cond
-                   (= input :tick) (chat--maybe-persist! (chat--reconcile m))
+                   ;; the tick reconciles the mesh, flushes a dirty log, and stamps :now
+                   ;; so the pure view can render relative times ("2m") that stay fresh.
+                   (= input :tick) (assoc (chat--maybe-persist! (chat--reconcile m)) :now (now))
                    (= input :blur) m
                    (not (nil? pm)) (chat--handle-peer m pm)
                    (not (nil? sd)) (chat--scroll m sd)
@@ -779,6 +797,40 @@ splitting an over-long word. Returns at least one line (`\"\"` for empty text)."
                   (chat--words text)))
       (if (empty? lines) [""] (into [] lines)))))
 
+;; timestamps, grouping ------------------------------------------------------
+
+(defn chat--blank (w)
+  "A run of `w` spaces (empty for w≤0) — used to hold a grouped line's chip column."
+  (if (> w 0) (string-repeat " " w) ""))
+
+(defn chat--stamp-str (at now tz)
+  "A ≤5-cell time label for the gutter: 'now' / 'Nm' / 'Nh' when recent (needs the model's
+`now`), else the tz-adjusted `HH:MM`. Right-justified to 5 cells so the gutter stays
+aligned; empty when the entry has no timestamp, or `HH:MM` when `now` is unset (0)."
+  (if (not (number? at))
+    ""
+    (let (d (- now at))
+      (cond
+        (or (<= now 0) (< d 0)) (pad-left (chat--hhmm at tz) 5)
+        (< d 60000) "  now"
+        (< d 3600000) (pad-left (str (quot d 60000) "m") 5)
+        (< d 86400000) (pad-left (str (quot d 3600000) "h") 5)
+        :else (pad-left (chat--hhmm at tz) 5)))))
+
+(defn chat--same-author? (p e)
+  "Is `e` from the same author + kind as its predecessor `p`, and close in time (<5 min)?
+If so its name chip and stamp can be dropped, grouping a run under one heading."
+  (and (= (get p :kind) (get e :kind))
+    (member? (get e :kind) [:me :them :action :dm-in :dm-out])
+    (= (get p :from) (get e :from))
+    (let (a (get p :at) b (get e :at))
+      (if (and (number? a) (number? b)) (< (abs (- b a)) 300000) true))))
+
+(defn chat--group-flags (entries)
+  "For each shown entry, true when it groups with the one before it (same author run)."
+  (let (v (into [] entries))
+    (map (fn (i) (and (> i 0) (chat--same-author? (nth v (- i 1)) (nth v i)))) (range (count v)))))
+
 ;; entry → visual lines (each a list of ops at row 0; the caller shifts them) --
 
 (defn chat--vlines-left (cols cx tsop chip chipface body bodyface)
@@ -795,57 +847,55 @@ splitting an over-long word. Returns at least one line (`\"\"` for empty text)."
                (concat lead body-op))))
     (map mk (range (count lines)))))
 
-(defn chat--vlines-me (cols cx tsop txt)
-  "Visual lines for your own (right-aligned) message; `◂ you` tags the last line."
-  (let (lines (chat--wrap txt (max 1 (- cols cx 8)))
+(defn chat--vlines-me (cols cx tsop txt grouped?)
+  "Visual lines for your own (right-aligned) message; `◂ you` tags the last line unless it's
+a grouped continuation of your previous line."
+  (let (tag (if grouped? "" "  ◂ you")
+        lines (chat--wrap txt (max 1 (- cols cx 8)))
         n (count lines)
         mk (fn (i)
-             (let (s (if (= i (- n 1)) (str (nth lines i) "  ◂ you") (nth lines i))
+             (let (s (if (= i (- n 1)) (str (nth lines i) tag) (nth lines i))
                    x (max cx (- cols (display-width s) 1)))
                (concat (if (= i 0) tsop []) [(text 0 x s {:fg :cyan :bold true})]))))
     (map mk (range n))))
 
-(defn chat--entry-vlines (e cols tz me)
+(defn chat--entry-vlines (e cols tz me now grouped?)
   "Render entry `e` into a list of visual lines (each a list of ops at row 0). Long text
-word-wraps; the `:at` stamp — formatted with the viewer's `tz` offset — sits dim in the
-left gutter of the first line. `:them` gets a coloured `name ▸` chip, `:action` a `✦`,
-`:me` sits right, DMs get a magenta `🔒` lock, results in magenta, system notes centred/
-dim. A peer line that @-mentions `me` is drawn bold-yellow so it stands out."
+word-wraps; a fixed 5-cell gutter carries the relative/`HH:MM` stamp (`now` drives the
+relative form). `:them` gets a coloured `name ▸` chip, `:action` a `✦`, `:me` sits right,
+DMs get a magenta `🔒` lock, results in magenta, system notes centred/dim. A peer line that
+@-mentions `me` is drawn bold-yellow. When `grouped?` (same author as the line above), the
+stamp and chip are blanked so a run reads as one block."
   (let (kind (get e :kind)
         txt (str (get e :text))
-        at (get e :at)
-        ts (if (number? at) (chat--hhmm at tz) nil)
-        tsop (if ts [(text 0 0 ts (face :ui/dim))] [])
-        cx (if ts (+ (display-width ts) 1) 1)
+        cx 6
+        tss (if grouped? "" (chat--stamp-str (get e :at) now tz))
+        tsop (if (blank? tss) [] [(text 0 0 tss (face :ui/dim))])
         pc (fn () (chat--peer-color (get e :from)))
-        hit (chat--mentions? txt me))
+        hit (chat--mentions? txt me)
+        left (fn (chip chipface body bodyface)
+               (chat--vlines-left cols
+                 cx
+                 tsop
+                 (if grouped? (chat--blank (display-width chip)) chip)
+                 chipface
+                 body
+                 bodyface)))
     (cond
-      (= kind :them) (chat--vlines-left cols
-                       cx
-                       tsop
-                       (str (get e :from) " ▸ ")
+      (= kind :them) (left (str (get e :from) " ▸ ")
                        {:fg (pc) :bold true}
                        txt
                        (if hit {:fg :yellow :bold true} {}))
-      (= kind :action) (chat--vlines-left cols
-                         cx
-                         tsop
-                         "✦ "
+      (= kind :action) (left "✦ "
                          {:fg (pc)}
                          (str (get e :from) " " txt)
                          (if hit {:fg :yellow :bold true} {:fg (pc)}))
-      (= kind :me) (chat--vlines-me cols cx tsop txt)
-      (= kind :dm-in) (chat--vlines-left cols
-                        cx
-                        tsop
-                        (str "🔒 " (get e :from) " → you  ")
+      (= kind :me) (chat--vlines-me cols cx tsop txt grouped?)
+      (= kind :dm-in) (left (str "🔒 " (get e :from) " → you  ")
                         {:fg :magenta :bold true}
                         txt
                         {:fg :magenta})
-      (= kind :dm-out) (chat--vlines-left cols
-                         cx
-                         tsop
-                         (str "🔒 you → " (get e :from) "  ")
+      (= kind :dm-out) (left (str "🔒 you → " (get e :from) "  ")
                          {:fg :magenta :bold true}
                          txt
                          {:fg :magenta})
@@ -855,6 +905,45 @@ dim. A peer line that @-mentions `me` is drawn bold-yellow so it stands out."
                            {:fg :magenta})]]
       :else (let (s (chat--clamp (str "— " txt " —") (- cols 2)))
               [[(text 0 (chat--center s cols) s (face :ui/dim))]]))))
+
+;; the right-hand roster / rooms panel ---------------------------------------
+
+(def *sidebar-width* 20)
+
+(defn chat--sidebar-lines (m)
+  "The right panel's content as `{:text :face}` rows: a PEOPLE section (you + connected
+peers in their accent colours) then a ROOMS section (current room marked `▸`, others dim
+with a `•N` unread dot)."
+  (let (peers (get m :peers)
+        me (get m :name)
+        room (get m :room)
+        ru (get m :room-unread {})
+        hdr (fn (s) {:text s :face {:fg :white :bold true}})
+        you {:text (str "● " me "  (you)") :face {:fg (chat--peer-color me) :bold true}}
+        peer-line (fn (p)
+                    {:text (str "● " (chat--short p))
+                     :face {:fg (chat--peer-color (chat--short p))}})
+        room-line (fn (r)
+                    (let (cur (= r room)
+                          n (get ru r 0))
+                      {:text (str (if cur "▸ " "  ")
+                               r
+                               (if (and (not cur) (> n 0)) (str "  •" n) ""))
+                       :face (if cur {:bold true} (face :ui/dim))}))
+        people (concat [(hdr (str "PEOPLE  " (+ 1 (count peers)))) you] (map peer-line peers))
+        rooms (concat [{:text "" :face (face :ui/dim)} (hdr "ROOMS")]
+                (map room-line (get m :rooms))))
+    (concat people rooms)))
+
+(defn chat--sidebar-ops (m panel-x sw rows)
+  "Lay the sidebar lines down the right panel (rows 1 .. `rows`-3), each clamped to `sw`."
+  (let (lines (chat--sidebar-lines m)
+        h (max 0 (- rows 3))
+        vis (take h lines)
+        mk (fn (i)
+             (let (ln (nth vis i))
+               (text (+ 1 i) panel-x (chat--clamp (get ln :text) sw) (get ln :face)))))
+    (map mk (range (count vis)))))
 
 (defn chat--visible? (e room)
   "Which log entries show in `room`: a room-scoped conversational line only when its
@@ -870,20 +959,30 @@ dim. A peer line that @-mentions `me` is drawn bold-yellow so it stands out."
   (mapcat (fn (i) (chat--shift-vline (nth vlines i) (+ base i))) (range (count vlines))))
 
 (defn chat-view (m cols rows)
-  "ui-run view (pure): header bar, the wrapped/scrollable message log, a hint (or a
-scroll indicator when scrolled up), and the input prompt with the cursor at point. The
-log wraps long lines and shows a `:scroll`-offset window bottom-aligned; `:scroll` is
-clamped to the valid range here, so an over-scroll can never render out of bounds."
+  "ui-run view (pure): a header bar; the wrapped/scrollable message log on the left; a
+right-hand roster/rooms panel (auto-hidden on a narrow terminal, `cols` < 60, so it
+degrades to full width); a hint (or a scroll indicator when scrolled up); and the input
+prompt with the cursor at point. Consecutive lines from one sender are grouped (chip +
+stamp dropped), stamps show relative time from `:now`. The log wraps to the log column and
+shows a `:scroll`-offset window bottom-aligned; `:scroll` is clamped here so an over-scroll
+can never render out of bounds."
   (let (edit (get m :edit)
         input (get edit :text)
         ptxt (editor/lineedit/lineedit--display-prompt edit)
         tz (get m :tz-offset)
         me (get m :name)
         room (get m :room)
+        nowt (get m :now 0)
+        ; the roster panel splits off the right, unless the terminal is too narrow
+        sw (if (>= cols 60) *sidebar-width* 0)
+        lw (if (> sw 0) (- cols sw 1) cols)
+        panel-x (- cols sw)
         ; log region: rows 1 .. rows-3
         h (max 0 (- rows 3))
-        shown (filter (fn (e) (chat--visible? e room)) (get m :log))
-        vlines (mapcat (fn (e) (chat--entry-vlines e cols tz me)) shown)
+        shown (into [] (filter (fn (e) (chat--visible? e room)) (get m :log)))
+        flags (into [] (chat--group-flags shown))
+        vlines (mapcat (fn (i) (chat--entry-vlines (nth shown i) lw tz me nowt (nth flags i)))
+                 (range (count shown)))
         total (count vlines)
         ; clamp scroll to range
         s (min (max 0 (get m :scroll)) (max 0 (- total h)))
@@ -893,6 +992,10 @@ clamped to the valid range here, so an over-scroll can never render out of bound
         ; bottom-align a short log
         base (+ 1 (max 0 (- h (count window))))
         log-ops (chat--place-vlines window base)
+        side-ops (if (> sw 0) (chat--sidebar-ops m panel-x sw rows) [])
+        sep-ops (if (> sw 0)
+                  (map (fn (r) (text r (- panel-x 1) "│" (face :ui/dim))) (range 1 (- rows 2)))
+                  [])
         peers (count (get m :peers))
         dial (get m :dial)
         mentions (get m :mentions 0)
@@ -919,6 +1022,8 @@ clamped to the valid range here, so an over-scroll can never render out of bound
     (apply frame
       (concat [(clear) (bar 0 cols hdr {:face {:bg :blue :fg :white :bold true}})]
         log-ops
+        sep-ops
+        side-ops
         [(bar (- rows 2) cols hint {:face (face :ui/dim)}) (text (- rows 1)
                                                              0
                                                              (chat--clamp prompt cols)

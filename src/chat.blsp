@@ -169,6 +169,17 @@ arrives both live and again via a history backfill."
   "Record `id` as seen, capped so the dedupe set can't grow without bound."
   (assoc m :seen (take-last *log-cap* (concat (get m :seen []) [id]))))
 
+(defn chat--fresh-msg (m id lc fresh)
+  "The dedupe gate every incoming stamped message passes through. When `(id, lc)` names a
+line we've already logged, only advance the Lamport clock (`chat--observe`) — no duplicate
+line, but the clock still moves so ordering stays monotonic; this is what collapses a live
+message and its later history echo to one. Otherwise remember `id`, merge the clock, and
+hand the updated model to `fresh` to fold the new line in. Centralises the invariant the
+three receive handlers used to spell out by hand."
+  (if (and lc (chat--seen? m id))
+    (chat--observe m lc)
+    (fresh (chat--observe (chat--remember m id) lc))))
+
 (defn chat--clear-alerts (m)
   "Clear the unread count and the mention badge — you've caught up (scrolled to the live
 bottom, sent a line, or switched rooms)."
@@ -206,6 +217,12 @@ pinging when you're staring right at it, while still alerting when you're away o
   "A short, quiet attention tone for a mention or DM — fire-and-forget, and a graceful
 no-op when the runtime has no audio (or it's muted). Wrapped so it can never throw."
   (try (audio-beep 880 110 0.14) (catch e nil)))
+
+(defn chat--alert (m miss?)
+  "Ring the attention bell and light the mention badge when `miss?` — the line landed while
+you'd otherwise not notice (unfocused, scrolled away, or in another room). A no-op when
+you're present, so a mention you're staring right at stays silent. Returns the model."
+  (if miss? (do (chat--bell) (update m :mentions inc)) m))
 
 (defn chat--see-room (m room)
   "Register `room` in `:rooms` if it's new, so `/rooms` lists it."
@@ -340,24 +357,24 @@ Rings the bell + badges when you'd otherwise miss it, and bumps the room's unrea
         lc (get p :lc)
         id (str "file|" (chat--id from lc))
         room (or (get p :room) *default-room*))
-    (if (and lc (chat--seen? m id))
-      (chat--observe m lc)
-      (let (saved (chat--save-file! (chat--file-target m from fname) bytes)
-            m1 (chat--observe (chat--remember (chat--see-room m room) id) lc)
-            m2 (chat--log m1
-                 {:kind :file-in
-                  :from from
-                  :file fname
-                  :size size
-                  :path saved
-                  :thumb (chat--thumb bytes fname)
-                  :room room
-                  :lc lc
-                  :at (get p :at)})
-            m3 (if (chat--present? m2 room false)
-                 m2
-                 (do (chat--bell) (update m2 :mentions inc))))
-        (-> m3 (chat--bump-room-unread room) chat--mark-dirty)))))
+    (chat--fresh-msg m
+      id
+      lc
+      (fn (m0)
+        (let (saved (chat--save-file! (chat--file-target m0 from fname) bytes)
+              m1 (chat--see-room m0 room)
+              m2 (chat--log m1
+                   {:kind :file-in
+                    :from from
+                    :file fname
+                    :size size
+                    :path saved
+                    :thumb (chat--thumb bytes fname)
+                    :room room
+                    :lc lc
+                    :at (get p :at)})
+              m3 (chat--alert m2 (not (chat--present? m2 room false))))
+          (-> m3 (chat--bump-room-unread room) chat--mark-dirty))))))
 
 (defn chat--send-file (m path)
   "`/send ⟨path⟩` — share a local file with the current room: read it (`slurp-bytes`), size-
@@ -644,14 +661,16 @@ it, and on an @-mention of us ring the bell + bump the badge. Persists the resul
         lc (get p :lc)
         id (chat--id from lc)
         room (or (get p :room) *default-room*))
-    (if (and lc (chat--seen? m id))
-      (chat--observe m lc)
-      (let (m1 (chat--observe (chat--remember (chat--see-room m room) id) lc)
-            m2 (chat--log m1 {:kind kind :from from :text text :room room :lc lc :at (get p :at)})
-            m3 (if (and (chat--mentions? text (get m2 :name)) (not (chat--present? m2 room false)))
-                 (do (chat--bell) (update m2 :mentions inc))
-                 m2))
-        (-> m3 (chat--bump-room-unread room) chat--mark-dirty (chat--clear-typing from))))))
+    (chat--fresh-msg m
+      id
+      lc
+      (fn (m0)
+        (let (m1 (chat--see-room m0 room)
+              m2 (chat--log m1 {:kind kind :from from :text text :room room :lc lc :at (get p :at)})
+              m3 (chat--alert m2
+                   (and (chat--mentions? text (get m2 :name))
+                     (not (chat--present? m2 room false)))))
+          (-> m3 (chat--bump-room-unread room) chat--mark-dirty (chat--clear-typing from)))))))
 
 (defn chat--recv-dm (m p)
   "Fold a received private message map `p` as a `:dm-in` — always an alert (bell + badge),
@@ -660,13 +679,12 @@ never room-filtered, and (having arrived point-to-point) never replayed to anyon
         text (str (get p :text))
         lc (get p :lc)
         id (str "dm|" (chat--id from lc)))
-    (if (and lc (chat--seen? m id))
-      (chat--observe m lc)
-      (let (m1 (chat--observe (chat--remember m id) lc)
-            m2 (chat--log m1 {:kind :dm-in :from from :text text :lc lc :at (get p :at)}))
-        (if (chat--present? m2 nil true)
-          (chat--mark-dirty m2)
-          (do (chat--bell) (chat--mark-dirty (update m2 :mentions inc))))))))
+    (chat--fresh-msg m
+      id
+      lc
+      (fn (m0)
+        (let (m1 (chat--log m0 {:kind :dm-in :from from :text text :lc lc :at (get p :at)}))
+          (chat--mark-dirty (chat--alert m1 (not (chat--present? m1 nil true)))))))))
 
 (defn chat--handle-peer (m msg)
   "Fold an incoming peer message into the model (and answer `:call`/`:want-history` in

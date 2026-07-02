@@ -25,7 +25,9 @@ final flush on quit) and reloaded on restart. A right-hand panel shows the **ros
 (you + connected peers in their accent colours) and the **rooms** (current one marked,
 others with an unread dot) — it auto-hides on a narrow terminal. Consecutive lines from
 one sender are **grouped** (name chip dropped) and stamps show **relative time** (2m, 1h)
-off the model's `:now`. Long lines word-wrap and PgUp/PgDn (or the mouse wheel) scroll the
+off the model's `:now`. A peer mid-line lights a transient `✎ … is typing…` note in the
+footer — **ephemeral** (no Lamport stamp, no history, no persistence): it's throttled while
+you compose, fades on its own after a few seconds, and clears the instant their line lands. Long lines word-wrap and PgUp/PgDn (or the mouse wheel) scroll the
 backlog. Resilience is a property, not an afterthought: `chat-update` is wrapped so **no**
 input — a malformed peer
 message, a bad `/run`, a garbled history dump — can crash the session; the worst case is a
@@ -69,6 +71,7 @@ work identically in the window and the terminal (it silently didn't, in the wind
     "/tz "
     "/say-hi"
     "/run "
+    "/send "
     "/nodes"
     "/rooms"
     "/help"
@@ -86,6 +89,8 @@ work identically in the window and the terminal (it silently didn't, in the wind
 (def *history-cap* 100)
 ; background connect retries before giving up (~5s @200ms)
 (def *dial-attempts* 25)
+; largest file `/send` will ship, and the biggest incoming transfer we'll save
+(def *file-cap* (* 8 1048576))
 (defn chat--err (e)
   "A short, one-line printable form of a caught error, for a friendly log line."
   (let (s (str e))
@@ -136,6 +141,11 @@ remote `bob@host:port`. Used to compare/display names regardless of qualificatio
 ;; --- attention, ordering & rooms --------------------------------------------
 
 (def *default-room* "#lobby")
+
+; a typing note lingers this long before the view assumes it went stale
+(def *typing-ttl-ms* 4000)
+; throttle: broadcast at most one typing ping this often while composing
+(def *typing-every-ms* 1500)
 
 (defn chat--bump (m)
   "Advance our Lamport clock for a local send; the new value stamps the outgoing line."
@@ -213,14 +223,184 @@ DMs and system/result notes are excluded (DMs are private; notes are local, not 
   (member? (get e :kind) [:me :them :action]))
 
 (defn chat--convo? (e)
-  "Any conversational entry, DMs included — the lines worth persisting to disk."
-  (member? (get e :kind) [:me :them :action :dm-in :dm-out]))
+  "Any conversational entry, DMs and file transfers included — the lines worth persisting to
+disk (a file line carries only its metadata + saved path, never the bytes)."
+  (member? (get e :kind) [:me :them :action :dm-in :dm-out :file-in :file-out]))
+
+(defn chat--roomed? (e)
+  "Entries the view hides outside their room: chat lines, `/me` actions, and file transfers.
+DMs, system notes, and closure results show in every room."
+  (member? (get e :kind) [:me :them :action :file-in :file-out]))
 
 (defn chat--find-peer (m nick)
   "The connected peer node whose bare short name matches `nick` (case-insensitive), or
 nil — used to address a `/msg` at one node rather than broadcasting."
   (let (want (string-downcase (chat--short nick)))
     (first (filter (fn (p) (= (string-downcase (chat--short p)) want)) (get m :peers)))))
+
+;; --- typing indicators (ephemeral presence) ---------------------------------
+
+(defn chat--composing? (text)
+  "Is `text` a real message being composed — non-blank and not a slash-command? Only these
+advertise 'typing…'; you don't broadcast a typing note while entering a command."
+  (and (not (blank? text)) (not (starts-with? text "/"))))
+
+(defn chat--emit-typing (m)
+  "Broadcast a throttled, ephemeral `[:typing name room]` while composing a message, and
+record the send time in `:typing-at`. Fire-and-forget — no Lamport stamp, no persistence,
+no local echo; it just lights a transient note on peers that fades on its own. A no-op
+off-throttle (`*typing-every-ms*`) or for a blank/command line. Returns the model."
+  (let (text (get (get m :edit) :text)
+        t (now))
+    (if (and (chat--composing? text)
+          (>= (- t (get m :typing-at 0)) *typing-every-ms*))
+      (do
+        (chat--broadcast [:typing (get m :name) (get m :room)])
+        (assoc m :typing-at t))
+      m)))
+
+(defn chat--note-typing (m from room now)
+  "Record that peer `from` is composing in `room` as of `now`. The view shows it for
+`*typing-ttl-ms*` then drops it, so a peer that stops (or crashes) mid-line clears itself.
+Pure — the clock is passed in."
+  (assoc m :typing (assoc (get m :typing {}) from {:room room :at now})))
+
+(defn chat--clear-typing (m from)
+  "Drop peer `from`'s typing note — their message just landed, so they're done composing."
+  (assoc m :typing (dissoc (get m :typing {}) from)))
+
+(defn chat--typing-active (m now)
+  "The names of peers shown as typing in the model's current room: noted within
+`*typing-ttl-ms*` of `now`, in this room, and not you. Sorted for a stable footer."
+  (let (room (get m :room)
+        me (get m :name)
+        fresh (filter (fn ([nm info])
+                        (and (not (= nm me))
+                          (= (get info :room) room)
+                          (< (- now (get info :at)) *typing-ttl-ms*)))
+                (get m :typing {})))
+    (into [] (sort (map (fn ([nm info]) nm) fresh)))))
+
+;; --- file sharing -----------------------------------------------------------
+
+(defn chat--human-size (n)
+  "A short human byte count for the log: `840 B`, `24 KB`, `3.5 MB`. A nil/negative `n`
+reads as `0 B`."
+  (let (b (if (and (number? n) (> n 0)) n 0))
+    (cond
+      (< b 1024) (str b " B")
+      (< b 1048576) (str (quot b 1024) " KB")
+      :else (str (to-fixed (/ b 1048576.0) 1) " MB"))))
+
+(defn chat--safe-basename (name)
+  "The final path component of `name` with every directory part stripped, so a peer-supplied
+name can't escape the incoming dir (`../../etc/passwd` → `passwd`). A degenerate name (empty,
+`.`, `..`, a trailing slash) falls back to `file`."
+  (let (parts (string-split (str name) "/")
+        base (trim (or (last parts) "")))
+    (if (or (blank? base) (= base ".") (= base "..")) "file" base)))
+
+(defn chat--parent-dir (path)
+  "The directory part of `path` — everything before the last `/` (\"\" when there is none)."
+  (let (parts (string-split (str path) "/"))
+    (join "/" (take (max 0 (- (count parts) 1)) parts))))
+
+(defn chat--file-target (m from name)
+  "The sandboxed path a file named `name` from peer `from` saves to: `<incoming>/<sender>/
+<safe-basename>`, both the sender folder and the filename basename-sanitised so a peer can't
+write outside the incoming tree. nil when the model has no `:incoming` dir (pure tests do no
+I/O)."
+  (let (root (get m :incoming))
+    (if (nil? root)
+      nil
+      (str root "/" (chat--safe-basename from) "/" (chat--safe-basename name)))))
+
+(defn chat--save-file! (target bytes)
+  "Write `bytes` to `target` (creating its parent dir) when there's a target, real bytes, and
+the size is within `*file-cap*`. Returns the saved path, or nil — no target, oversize, or an
+I/O error, all swallowed (a transfer is a convenience, never a reason to crash)."
+  (if (and target (bytes? bytes) (<= (byte-length bytes) *file-cap*))
+    (try
+      (do
+        (make-dir (chat--parent-dir target))
+        (spit-bytes target bytes)
+        target)
+      (catch e nil))
+    nil))
+
+(defn chat--recv-file (m p)
+  "Fold an incoming `[:file …]` transfer (`{:from :file :bytes :room :lc :at}`): dedupe by
+Lamport id, save the bytes into the sandboxed incoming dir (basename only, size-capped, errors
+swallowed), and log a lightweight `:file-in` metadata entry (sender, filename, byte size, saved
+path). The bytes never enter the conversation log or history backfill — only the metadata does.
+Rings the bell + badges when you'd otherwise miss it, and bumps the room's unread dot."
+  (let (from (chat--node-str (get p :from))
+        fname (chat--safe-basename (get p :file))
+        bytes (get p :bytes)
+        size (if (bytes? bytes) (byte-length bytes) 0)
+        lc (get p :lc)
+        id (str "file|" (chat--id from lc))
+        room (or (get p :room) *default-room*))
+    (if (and lc (chat--seen? m id))
+      (chat--observe m lc)
+      (let (saved (chat--save-file! (chat--file-target m from fname) bytes)
+            m1 (chat--observe (chat--remember (chat--see-room m room) id) lc)
+            m2 (chat--log m1
+                 {:kind :file-in
+                  :from from
+                  :file fname
+                  :size size
+                  :path saved
+                  :room room
+                  :lc lc
+                  :at (get p :at)})
+            m3 (if (chat--present? m2 room false)
+                 m2
+                 (do (chat--bell) (assoc m2 :mentions (+ 1 (get m2 :mentions 0))))))
+        (chat--mark-dirty (chat--bump-room-unread m3 room))))))
+
+(defn chat--send-file (m path)
+  "`/send ⟨path⟩` — share a local file with the current room: read it (`slurp-bytes`), size-
+check it against `*file-cap*`, broadcast the bytes as `[:file …]`, and echo a `:file-out` line.
+A blank arg, an unreadable file, or one over the cap is a friendly note, not a send. Stamped +
+deduped like a message; the bytes themselves are never persisted (only the metadata line is)."
+  (if (blank? path)
+    (chat--log m {:kind :system :text "usage: /send ⟨path⟩"})
+    (let (bytes (try (slurp-bytes path) (catch e nil)))
+      (cond
+        (nil? bytes) (chat--log m {:kind :system :text (str "can't read " path)})
+        (> (byte-length bytes) *file-cap*) (chat--log m
+                                             {:kind :system
+                                              :text (str (chat--safe-basename path)
+                                                      " is too big ("
+                                                      (chat--human-size (byte-length bytes))
+                                                      " — max "
+                                                      (chat--human-size *file-cap*)
+                                                      ")")})
+        :else (let (m1 (chat--bump (chat--clear-alerts m))
+                    lc (get m1 :lc)
+                    at (now)
+                    room (get m1 :room)
+                    from (get m1 :name)
+                    fname (chat--safe-basename path)
+                    size (byte-length bytes))
+                (do
+                  (chat--broadcast [:file {:from from
+                                           :file fname
+                                           :bytes bytes
+                                           :room room
+                                           :lc lc
+                                           :at at}])
+                  (chat--mark-dirty (chat--remember (chat--log m1
+                                                      {:kind :file-out
+                                                       :from from
+                                                       :file fname
+                                                       :size size
+                                                       :path path
+                                                       :room room
+                                                       :lc lc
+                                                       :at at})
+                                      (str "file|" (chat--id from lc))))))))))
 
 ;; --- closures over the wire -------------------------------------------------
 
@@ -266,7 +446,8 @@ up). `:lc` is our Lamport clock and `:seen` the dedupe set for ordering + one-sh
 delivery. `:focused` tracks whether the window has focus (a GUI `:blur` clears it, any
 keystroke sets it) so a mention/DM only alerts when you wouldn't already see it. `:store`
 is the on-disk log path (nil until `main` names the node — pure tests leave it nil, so no
-I/O); `:dirty`/`:persisted-at` batch those writes. `:tick-ms` is the refresh beat — also
+I/O); `:dirty`/`:persisted-at` batch those writes. `:incoming` is the dir received `/send`
+files are saved under (nil in pure tests, so no I/O). `:tick-ms` is the refresh beat — also
 how often peer traffic is drained, the mesh reconciled into `:peers`, and a dirty log
 flushed to disk (see `chat--reconcile` / `chat--maybe-persist!`)."
   {:name name
@@ -281,11 +462,14 @@ flushed to disk (see `chat--reconcile` / `chat--maybe-persist!`)."
    :room-unread {}
    :unread 0
    :mentions 0
+   :typing {}
+   :typing-at 0
    :now 0
    :lc 0
    :seen []
    :focused true
    :store nil
+   :incoming nil
    :dirty false
    :persisted-at 0
    :log [{:kind :system
@@ -408,7 +592,7 @@ it, and on an @-mention of us ring the bell + bump the badge. Persists the resul
             m3 (if (and (chat--mentions? text (get m2 :name)) (not (chat--present? m2 room false)))
                  (do (chat--bell) (assoc m2 :mentions (+ 1 (get m2 :mentions 0))))
                  m2))
-        (chat--mark-dirty (chat--bump-room-unread m3 room))))))
+        (chat--clear-typing (chat--mark-dirty (chat--bump-room-unread m3 room)) from)))))
 
 (defn chat--recv-dm (m p)
   "Fold a received private message map `p` as a `:dm-in` — always an alert (bell + badge),
@@ -435,6 +619,8 @@ fields rather than failing to match."
     ([:chat p] (chat--recv m p :them))
     ([:action p] (chat--recv m p :action))
     ([:dm p] (chat--recv-dm m p))
+    ([:file p] (chat--recv-file m p))
+    ([:typing from room] (chat--note-typing m from room (now)))
     ([:want-history from] (do (chat--to from [:history (chat--history-entries m)]) m))
     ([:history entries] (if (get m :backfilled) m (chat--backfill m entries)))
     ([:dial-failed name] (chat--log m
@@ -499,7 +685,7 @@ surfaces each peer — and requests its history — as the links come up."
             (chat--log m {:kind :system :text (str "connecting to " name " …")}))))
 
 (def *help*
-  "commands: /connect ⟨name|host:port⟩ · /join ⟨#room⟩ · /rooms · /msg ⟨nick⟩ ⟨text⟩ · /nick ⟨name⟩ · /me ⟨action⟩ · /say-hi · /run ⟨expr⟩ · /nodes · /tz ⟨±h⟩ · /clear · /help · /quit  ·  @nick pings")
+  "commands: /connect ⟨name|host:port⟩ · /join ⟨#room⟩ · /rooms · /msg ⟨nick⟩ ⟨text⟩ · /send ⟨path⟩ · /nick ⟨name⟩ · /me ⟨action⟩ · /say-hi · /run ⟨expr⟩ · /nodes · /tz ⟨±h⟩ · /clear · /help · /quit  ·  @nick pings")
 
 (defn chat--send-say (m text action?)
   "Broadcast a public line (or a `/me` action when `action?`) to the current room, echo it
@@ -531,7 +717,7 @@ Resolves `nick` against connected peers by short name; a missing peer or empty b
 friendly usage note. The local echo is a `:dm-out`; the recipient logs a `:dm-in`."
   (let (sp (index-of rest " ")
         nick (if (< sp 0) (trim rest) (trim (substring rest 0 sp)))
-        text (if (< sp 0) "" (trim (substring rest (+ sp 1) (string-length rest))))
+        text (if (< sp 0) "" (trim (substring rest (+ sp 1))))
         node (chat--find-peer m nick))
     (cond
       (or (blank? nick) (blank? text)) (chat--log m
@@ -566,7 +752,7 @@ so the new room starts fresh; the room is registered so `/rooms` lists it."
   "Parse a `/tz` argument (whole hours east of UTC — `+2`, `-5`, `0`) into minutes, or
 nil if it isn't a plain integer."
   (let (t (trim s)
-        body (if (starts-with? t "+") (substring t 1 (string-length t)) t)
+        body (if (starts-with? t "+") (substring t 1) t)
         h (try (read-string body) (catch e nil)))
     (if (int? h) (* h 60) nil)))
 
@@ -613,6 +799,7 @@ rest), so no input can break the session."
                                               (if (>= off 0) "+" "")
                                               (quot off 60))})))
     (starts-with? line "/run ") (chat--run-expr m (chat--rest-after line))
+    (starts-with? line "/send ") (chat--send-file m (trim (chat--rest-after line)))
     :else (chat--send-say m line false)))
 
 ;; --- Tab completion ---------------------------------------------------------
@@ -640,7 +827,8 @@ shared prefix fills as far as it can and lists the candidates in the log."
   (or (= k :enter) (= k :ctrl-j) (= k :ctrl-m)))
 ;; The chat-protocol message tags — the shapes `chat--handle-peer` folds. Kept as a set
 ;; so `chat--peer-msg` can spot a raw one no matter how the frontend surfaced it.
-(def *peer-tags* [:chat :action :dm :want-history :history :dial-failed :call :result])
+(def *peer-tags*
+  [:chat :action :dm :file :typing :want-history :history :dial-failed :call :result])
 
 (defn chat--peer-msg (x)
   "If input `x` is an incoming peer message, return the inner `[:tag …]` to hand
@@ -670,7 +858,7 @@ run the line and reset the editor (remembering it in history); `:cancel` (C-c) a
                              hist (editor/lineedit/lineedit--remember (get edit :hist) line))
                          ;; sending jumps back to the live bottom (:scroll 0)
                          (chat--submit (assoc m :edit (chat--fresh-edit hist) :scroll 0) line))
-      (nil? done) (assoc m :edit edit)
+      (nil? done) (chat--emit-typing (assoc m :edit edit))
       :else (assoc m :done true))))
 
 (defn chat--scroll (m by)
@@ -738,7 +926,7 @@ model is kept. On quit, any pending write is flushed."
 (defn chat--take-cells--go (s width i)
   (if (or (>= i (string-length s))
         (> (display-width (substring s 0 (+ i 1))) width))
-    [(substring s 0 i) (substring s i (string-length s))]
+    [(substring s 0 i) (substring s i)]
     (chat--take-cells--go s width (+ i 1))))
 
 (defn chat--clamp (s width)
@@ -771,7 +959,7 @@ model is kept. On quit, any pending write is flushed."
     (into [] (concat acc [s]))
     (let (pre (first (chat--take-cells s width))
           pre (if (= pre "") (substring s 0 1) pre)
-          rest (substring s (string-length pre) (string-length s)))
+          rest (substring s (string-length pre)))
       (chat--chunks--acc rest width (concat acc [pre])))))
 
 (defn chat--chunks (s width)
@@ -899,6 +1087,17 @@ stamp and chip are blanked so a run reads as one block."
                          {:fg :magenta :bold true}
                          txt
                          {:fg :magenta})
+      (= kind :file-in) (left (str "📎 " (get e :from) " ▸ ")
+                          {:fg :blue :bold true}
+                          (str (get e :file)
+                            "  "
+                            (chat--human-size (get e :size))
+                            (if (get e :path) (str "  → " (get e :path)) ""))
+                          {:fg :blue})
+      (= kind :file-out) (left "📎 you ▸ "
+                           {:fg :blue :bold true}
+                           (str (get e :file) "  " (chat--human-size (get e :size)))
+                           {:fg :blue})
       (= kind :result) [[(text 0
                            1
                            (chat--clamp (str (get e :from) " · " txt) (- cols 2))
@@ -946,9 +1145,9 @@ with a `•N` unread dot)."
     (map mk (range (count vis)))))
 
 (defn chat--visible? (e room)
-  "Which log entries show in `room`: a room-scoped conversational line only when its
-`:room` matches; everything else (DMs, system notes, closure results) shows everywhere."
-  (if (chat--public? e) (= (or (get e :room) *default-room*) room) true))
+  "Which log entries show in `room`: a room-scoped line (chat, action, or file transfer) only
+when its `:room` matches; everything else (DMs, system notes, closure results) shows everywhere."
+  (if (chat--roomed? e) (= (or (get e :room) *default-room*) room) true))
 
 (defn chat--shift-vline (vline row)
   "Move a row-0 visual line's ops onto absolute `row`."
@@ -1000,6 +1199,16 @@ can never render out of bounds."
         dial (get m :dial)
         mentions (get m :mentions 0)
         unread (get m :unread 0)
+        typers (chat--typing-active m nowt)
+        typing-note (cond
+                      (empty? typers) ""
+                      (= (count typers) 1) (str "✎ " (first typers) " is typing…")
+                      (= (count typers) 2) (str "✎ "
+                                             (first typers)
+                                             " and "
+                                             (second typers)
+                                             " are typing…")
+                      :else (str "✎ " (count typers) " people are typing…"))
         hdr (str " ⬢ broodchat   "
               me
               "   ·   "
@@ -1010,14 +1219,15 @@ can never render out of bounds."
               (if (= peers 1) "" "s")
               (if (> mentions 0) (str "   ·   🔔 " mentions) "")
               (if dial (str "   ·   dial " dial) ""))
-        hint (if (> s 0)
-               (str " ▲ scrolled up"
-                 (if (> unread 0) (str " · " unread " new") "")
-                 " · PgDn to catch up · showing "
-                 end
-                 "/"
-                 total)
-               " Tab · Enter send · /join /msg · PgUp/PgDn scroll · @nick pings · /help · Ctrl-C quit")
+        hint (cond
+               (> s 0) (str " ▲ scrolled up"
+                         (if (> unread 0) (str " · " unread " new") "")
+                         " · PgDn to catch up · showing "
+                         end
+                         "/"
+                         total)
+               (not (blank? typing-note)) (str " " typing-note)
+               :else " Tab · Enter send · /join /msg · PgUp/PgDn scroll · @nick pings · /help · Ctrl-C quit")
         prompt (str ptxt input))
     (apply frame
       (concat [(clear) (bar 0 cols hdr {:face {:bg :blue :fg :white :bold true}})]
@@ -1045,6 +1255,8 @@ rides on `(nodes)`, not the mailbox, so it needs no shape here. Mirrors `ui/with
                         ([:chat p] [:peer [:chat p]])
                         ([:action p] [:peer [:action p]])
                         ([:dm p] [:peer [:dm p]])
+                        ([:file p] [:peer [:file p]])
+                        ([:typing from room] [:peer [:typing from room]])
                         ([:want-history from] [:peer [:want-history from]])
                         ([:history entries] [:peer [:history entries]])
                         ([:dial-failed name] [:peer [:dial-failed name]])
@@ -1159,13 +1371,16 @@ registered. Nothing to restore leaves `m` untouched."
     (let (recs (into [] entries)
           maxlc (fold (fn (a e) (max a (if (number? (get e :lc)) (get e :lc) 0))) 0 recs)
           ids (map (fn (e)
-                     (if (member? (get e :kind) [:dm-in :dm-out])
-                       (str "dm|" (chat--id (or (get e :from) "?") (get e :lc)))
-                       (chat--id (or (get e :from) "?") (get e :lc))))
+                     (let (base (chat--id (or (get e :from) "?") (get e :lc))
+                           k (get e :kind))
+                       (cond
+                         (member? k [:dm-in :dm-out]) (str "dm|" base)
+                         (member? k [:file-in :file-out]) (str "file|" base)
+                         :else base)))
                 recs)
           m1 (fold chat--see-room
                m
-               (map (fn (e) (or (get e :room) *default-room*)) (filter chat--public? recs)))
+               (map (fn (e) (or (get e :room) *default-room*)) (filter chat--roomed? recs)))
           log (get m1 :log))
       (assoc m1
         :lc (max (get m1 :lc 0) maxlc)
@@ -1185,7 +1400,11 @@ lines survive a restart."
   (let (store (chat--store-path (node-name))
         loaded (do (try (make-dir (chat--store-dir)) (catch e nil)) (chat--load-entries store))
         ;; :persisted-at now so the just-loaded data isn't rewritten on the first tick
-        m0 (chat--restore (assoc (chat-init name) :store store :persisted-at (now)) loaded)
+        m0 (chat--restore (assoc (chat-init name)
+                            :store store
+                            :incoming (str (chat--store-dir) "/incoming")
+                            :persisted-at (now))
+             loaded)
         m1 (if dial
              (chat--log (assoc m0 :dial dial)
                {:kind :system :text (str "listening — remote peers: /connect " dial)})

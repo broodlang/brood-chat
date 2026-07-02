@@ -556,6 +556,139 @@
     (is (vector? (chat-view (chat-init "a") 50 16)))
     (is (vector? (chat-view (assoc (chat-init "a") :peers [:bob@h]) 90 16)))))
 
+(describe "chat: typing indicators"
+  (test "composing? is true for a real message, false for blank or a command"
+    (is (chat/chat--composing? "hello"))
+    (refute (chat/chat--composing? ""))
+    (refute (chat/chat--composing? "   "))
+    (refute (chat/chat--composing? "/join #dev")))
+
+  (test "note-typing records a peer; typing-active lists fresh in-room peers, not you"
+    (let (m (chat/chat--note-typing (chat-init "ada") "bob" "#lobby" 1000))
+      ; within the ttl window
+      (assert= (chat/chat--typing-active m 2000) ["bob"])
+      ; past the ttl → dropped
+      (assert= (chat/chat--typing-active m 999999) [])
+      ; your own name never shows
+      (assert= (chat/chat--typing-active (chat/chat--note-typing m "ada" "#lobby" 1000) 2000)
+        ["bob"])
+      ; a note in another room is hidden while you're in #lobby
+      (assert= (chat/chat--typing-active (chat/chat--note-typing m "cid" "#dev" 1000) 2000)
+        ["bob"])))
+
+  (test "handle-peer routes a raw [:typing …] into the model"
+    (let (m (chat/chat--handle-peer (chat-init "ada") [:typing "bob" "#lobby"]))
+      (is (member? "bob" (chat/chat--typing-active m (now))))))
+
+  (test "peer-msg recognises a raw [:typing …]"
+    (assert= (chat/chat--peer-msg [:typing "bob" "#lobby"]) [:typing "bob" "#lobby"]))
+
+  (test "a peer's message clears their typing note"
+    (let (m0 (chat/chat--note-typing (chat-init "ada") "bob" "#lobby" 1000)
+          m1 (chat/chat--recv m0 {:from "bob" :text "hi" :room "#lobby" :lc 1 :at 2} :them))
+      (assert= (chat/chat--typing-active m1 1500) []))))
+
+(describe "chat: file sharing (/send)"
+  (test "human-size formats bytes, KB, MB"
+    (assert= (chat/chat--human-size 840) "840 B")
+    (assert= (chat/chat--human-size 24576) "24 KB")
+    ; 3_670_016 = 3.5 * 1048576
+    (assert= (chat/chat--human-size 3670016) "3.5 MB")
+    (assert= (chat/chat--human-size nil) "0 B"))
+
+  (test "safe-basename strips directory parts and rejects traversal"
+    (assert= (chat/chat--safe-basename "cat.png") "cat.png")
+    (assert= (chat/chat--safe-basename "/etc/passwd") "passwd")
+    (assert= (chat/chat--safe-basename "../../etc/passwd") "passwd")
+    (assert= (chat/chat--safe-basename "a/b/c.txt") "c.txt")
+    (assert= (chat/chat--safe-basename "..") "file")
+    (assert= (chat/chat--safe-basename "") "file")
+    (assert= (chat/chat--safe-basename "dir/") "file"))
+
+  (test "file-target sandboxes under <incoming>/<sender>/<basename>, nil without :incoming"
+    (let (m (assoc (chat-init "a") :incoming "/inc"))
+      (assert= (chat/chat--file-target m "bob" "cat.png") "/inc/bob/cat.png")
+      ; a traversal attempt in either component is basename'd away
+      (assert= (chat/chat--file-target m "bob" "../../etc/passwd") "/inc/bob/passwd")
+      (assert= (chat/chat--file-target m "e/vil" "x") "/inc/vil/x"))
+    ; no :incoming (pure init) → nil, so recv does no disk I/O
+    (is (nil? (chat/chat--file-target (chat-init "a") "bob" "cat.png"))))
+
+  (test "receiving a file logs a :file-in metadata line (no bytes) and badges when away"
+    (let (bytes (string->utf8-bytes "PNGDATA")
+          away (chat/chat-update (chat-init "a") :blur 80 24)
+          m (chat/chat--recv-file away
+              {:from :bob
+               :file "holiday.png"
+               :bytes bytes
+               :room "#lobby"
+               :lc 1
+               :at 5}))
+      (assert= (get (last-entry m) :kind) :file-in)
+      (assert= (get (last-entry m) :from) "bob")
+      (assert= (get (last-entry m) :file) "holiday.png")
+      ; size is the actual byte length, not a claimed field
+      (assert= (get (last-entry m) :size) 7)
+      ; no :incoming → not saved to disk
+      (is (nil? (get (last-entry m) :path)))
+      ; the bytes never enter the conversation log
+      (is (nil? (get (last-entry m) :bytes)))
+      ; away → badge
+      (assert= (get m :mentions) 1)))
+
+  (test "a file you're looking right at doesn't badge"
+    (let (m (chat/chat--recv-file (chat-init "a")
+              {:from :bob :file "x.bin" :bytes (string->utf8-bytes "z") :room "#lobby" :lc 1 :at 1}))
+      (assert= (get m :mentions) 0)))
+
+  (test "a duplicate file (same sender + Lamport id) is deduped"
+    (let (p {:from :bob :file "x.bin" :bytes (string->utf8-bytes "z") :room "#lobby" :lc 1 :at 1}
+          m1 (chat/chat--recv-file (chat-init "a") p)
+          n1 (count (filter (fn (e) (= (get e :kind) :file-in)) (get m1 :log)))
+          m2 (chat/chat--recv-file m1 p)
+          n2 (count (filter (fn (e) (= (get e :kind) :file-in)) (get m2 :log))))
+      (assert= n1 1)
+      (assert= n2 1)))
+
+  (test "a file is room-scoped in the view like a chat line"
+    (let (e {:kind :file-in :from "bob" :file "x" :size 1 :room "#dev"})
+      (refute (chat/chat--visible? e "#lobby"))
+      (is (chat/chat--visible? e "#dev"))))
+
+  (test "a file is never replayed in history backfill (bytes are local)"
+    (let (m (assoc (chat-init "a")
+              :log [{:kind :system :text "w"} {:kind :file-in
+                                               :from "bob"
+                                               :file "x"
+                                               :size 3
+                                               :room "#lobby"
+                                               :lc 1}
+                     {:kind :me :text "public" :room "#lobby" :lc 2}])
+          hs (chat/chat--history-entries m))
+      (assert= (count hs) 1)
+      (assert= (get (first hs) :text) "public")))
+
+  (test "/send with no path, or an unreadable one, is a friendly note — not a send"
+    (let (m (chat/chat--submit (chat-init "a") "/send "))
+      (assert= (get (last-entry m) :kind) :system)
+      (is (string-contains? (get (last-entry m) :text) "usage")))
+    (let (m (chat/chat--submit (chat-init "a") "/send /no/such/file-xyz.bin"))
+      (assert= (get (last-entry m) :kind) :system)
+      (is (string-contains? (get (last-entry m) :text) "can't read"))))
+
+  (test "a raw [:file …] routes through chat-update (GUI path) and peer-msg spots it"
+    (let (m (chat-update (chat-init "a")
+              [:file {:from :bob
+                      :file "g.png"
+                      :bytes (string->utf8-bytes "gg")
+                      :room "#lobby"
+                      :lc 1
+                      :at 1}]
+              80
+              24))
+      (assert= (get (last-entry m) :kind) :file-in))
+    (assert= (chat/chat--peer-msg [:file {:from :b :file "x"}]) [:file {:from :b :file "x"}])))
+
 (describe "chat: view helpers"
   (test "rest-after returns the argument past the first space"
     (assert= (chat/chat--rest-after "/connect bob") "bob")

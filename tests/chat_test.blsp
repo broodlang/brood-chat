@@ -811,7 +811,22 @@
   (test "strip-thumb drops the transient :thumb before persistence"
     (assert= (chat/chat--strip-thumb {:kind :file-in :file "x" :thumb {:width 2}})
       {:kind :file-in :file "x"})
-    (assert= (chat/chat--strip-thumb {:kind :me :text "hi"}) {:kind :me :text "hi"})))
+    (assert= (chat/chat--strip-thumb {:kind :me :text "hi"}) {:kind :me :text "hi"}))
+
+  (test "an image-named file with non-bytes payload degrades to a clean :file-in (no crash)"
+    ;; image-thumb throws on a non-sequence; chat--thumb must guard so a garbled transfer
+    ;; still logs a metadata line rather than being discarded as a recovered-error note
+    (let (m (chat-update (chat-init "a")
+              [:file {:from :bob :file "photo.png" :bytes 123 :room "#lobby" :lc 7 :at 1}]
+              80
+              24))
+      (assert= (get (last-entry m) :kind) :file-in)
+      (is (nil? (get (last-entry m) :thumb))))
+    ; nil payload is likewise clean
+    (let (m (chat/chat--recv-file (chat-init "a")
+              {:from :bob :file "x.png" :room "#lobby" :lc 1 :at 1}))
+      (assert= (get (last-entry m) :kind) :file-in)
+      (is (nil? (get (last-entry m) :thumb))))))
 
 (describe "chat: view helpers"
   (test "rest-after returns the argument past the first space"

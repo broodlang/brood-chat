@@ -421,8 +421,11 @@ deduped like a message; the bytes themselves are never persisted (only the metad
 (defn chat--thumb (bytes name)
   "Decode a small preview `{:width :height :rgba}` from `bytes` when `name` looks like an image
 and it actually decodes, else nil. Capped to `*img-cells-w*`×(2·`*img-cells-h*`) pixels so a
-preview is a handful of rows. Total — a non-image or corrupt file just yields nil (no preview)."
-  (if (chat--image? name) (image-thumb bytes *img-cells-w* (* 2 *img-cells-h*)) nil))
+preview is a handful of rows. Total on untrusted input — a non-`bytes` payload (`image-thumb`
+throws on a non-sequence), a non-image name, or a corrupt file all yield nil (no preview)."
+  (if (and (bytes? bytes) (chat--image? name))
+    (image-thumb bytes *img-cells-w* (* 2 *img-cells-h*))
+    nil))
 
 (defn chat--px (rgba bufw x y)
   "The `[r g b]` of pixel (`x`,`y`) in a row-major RGBA8 buffer `bufw` pixels wide."

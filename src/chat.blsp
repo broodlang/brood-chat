@@ -149,7 +149,7 @@ remote `bob@host:port`. Used to compare/display names regardless of qualificatio
 
 (defn chat--bump (m)
   "Advance our Lamport clock for a local send; the new value stamps the outgoing line."
-  (assoc m :lc (+ 1 (get m :lc 0))))
+  (update m :lc inc))
 
 (defn chat--observe (m lc)
   "Merge a peer's Lamport clock `lc` on receipt: ours jumps past the larger of the two.
@@ -184,8 +184,7 @@ batched (`chat--maybe-persist!`), so a burst of messages costs one write, not on
 cleared for the room you're currently in — you're reading it."
   (if (= room (get m :room))
     m
-    (let (ru (get m :room-unread {}))
-      (assoc m :room-unread (assoc ru room (+ 1 (get ru room 0)))))))
+    (update-in m [:room-unread room] (fn (n) (+ 1 (if n n 0))))))
 
 (defn chat--present? (m room dm?)
   "Would a message for `room` (or a DM, when `dm?`) already be on your screen — the window
@@ -357,8 +356,8 @@ Rings the bell + badges when you'd otherwise miss it, and bumps the room's unrea
                   :at (get p :at)})
             m3 (if (chat--present? m2 room false)
                  m2
-                 (do (chat--bell) (assoc m2 :mentions (+ 1 (get m2 :mentions 0))))))
-        (chat--mark-dirty (chat--bump-room-unread m3 room))))))
+                 (do (chat--bell) (update m2 :mentions inc))))
+        (-> m3 (chat--bump-room-unread room) chat--mark-dirty)))))
 
 (defn chat--send-file (m path)
   "`/send ⟨path⟩` — share a local file with the current room: read it (`slurp-bytes`), size-
@@ -392,17 +391,18 @@ deduped like a message; the bytes themselves are never persisted (only the metad
                                            :room room
                                            :lc lc
                                            :at at}])
-                  (chat--mark-dirty (chat--remember (chat--log m1
-                                                      {:kind :file-out
-                                                       :from from
-                                                       :file fname
-                                                       :size size
-                                                       :path path
-                                                       :thumb (chat--thumb bytes fname)
-                                                       :room room
-                                                       :lc lc
-                                                       :at at})
-                                      (str "file|" (chat--id from lc))))))))))
+                  (-> (chat--log m1
+                        {:kind :file-out
+                         :from from
+                         :file fname
+                         :size size
+                         :path path
+                         :thumb (chat--thumb bytes fname)
+                         :room room
+                         :lc lc
+                         :at at})
+                    (chat--remember (str "file|" (chat--id from lc)))
+                    chat--mark-dirty)))))))
 
 ;; inline image preview: an image file renders as half-block cells under its line ---
 
@@ -649,9 +649,9 @@ it, and on an @-mention of us ring the bell + bump the badge. Persists the resul
       (let (m1 (chat--observe (chat--remember (chat--see-room m room) id) lc)
             m2 (chat--log m1 {:kind kind :from from :text text :room room :lc lc :at (get p :at)})
             m3 (if (and (chat--mentions? text (get m2 :name)) (not (chat--present? m2 room false)))
-                 (do (chat--bell) (assoc m2 :mentions (+ 1 (get m2 :mentions 0))))
+                 (do (chat--bell) (update m2 :mentions inc))
                  m2))
-        (chat--clear-typing (chat--mark-dirty (chat--bump-room-unread m3 room)) from)))))
+        (-> m3 (chat--bump-room-unread room) chat--mark-dirty (chat--clear-typing from))))))
 
 (defn chat--recv-dm (m p)
   "Fold a received private message map `p` as a `:dm-in` — always an alert (bell + badge),
@@ -666,7 +666,7 @@ never room-filtered, and (having arrived point-to-point) never replayed to anyon
             m2 (chat--log m1 {:kind :dm-in :from from :text text :lc lc :at (get p :at)}))
         (if (chat--present? m2 nil true)
           (chat--mark-dirty m2)
-          (do (chat--bell) (chat--mark-dirty (assoc m2 :mentions (+ 1 (get m2 :mentions 0))))))))))
+          (do (chat--bell) (chat--mark-dirty (update m2 :mentions inc))))))))
 
 (defn chat--handle-peer (m msg)
   "Fold an incoming peer message into the model (and answer `:call`/`:want-history` in
@@ -761,14 +761,15 @@ up (clears the unread/mention alerts) and persists. A blank line is a no-op."
           payload {:from from :text text :room room :lc lc :at at})
       (do
         (chat--broadcast [(if action? :action :chat) payload])
-        (chat--mark-dirty (chat--remember (chat--log m1
-                                            {:kind (if action? :action :me)
-                                             :from from
-                                             :text text
-                                             :room room
-                                             :lc lc
-                                             :at at})
-                            (chat--id from lc)))))))
+        (-> (chat--log m1
+              {:kind (if action? :action :me)
+               :from from
+               :text text
+               :room room
+               :lc lc
+               :at at})
+          (chat--remember (chat--id from lc))
+          chat--mark-dirty)))))
 
 (defn chat--send-dm (m rest)
   "Private message: `/msg ⟨nick⟩ ⟨text⟩` sent to just that peer's node, not the room.
@@ -788,13 +789,14 @@ friendly usage note. The local echo is a `:dm-out`; the recipient logs a `:dm-in
                   from (get m1 :name))
               (do
                 (chat--to node [:dm {:from from :text text :lc lc :at at}])
-                (chat--mark-dirty (chat--remember (chat--log m1
-                                                    {:kind :dm-out
-                                                     :from (chat--short nick)
-                                                     :text text
-                                                     :lc lc
-                                                     :at at})
-                                    (str "dm|" (chat--id from lc)))))))))
+                (-> (chat--log m1
+                      {:kind :dm-out
+                       :from (chat--short nick)
+                       :text text
+                       :lc lc
+                       :at at})
+                  (chat--remember (str "dm|" (chat--id from lc)))
+                  chat--mark-dirty))))))
 
 (defn chat--do-join (m arg)
   "Switch to (and create on demand) room `arg`. Pins to the live bottom and clears alerts
@@ -1305,24 +1307,18 @@ can never render out of bounds."
 
 (defn chat--with-peers (display)
   "Wrap `display` so its `:poll` first returns any queued chat-protocol message as a
-`[:peer msg]` input, else polls the frontend as usual. A *selective* receive (it
-matches only the chat-traffic shapes — a chat line, a `/me` action, a history
-request/reply, or a shipped `:call`/`:result` closure) so GUI key/mouse messages,
-which share this process's mailbox, stay queued for the frontend's own poll. Presence
-rides on `(nodes)`, not the mailbox, so it needs no shape here. Mirrors `ui/with-events`."
+`[:peer msg]` input, else polls the frontend as usual. A *selective* receive: the `:when`
+guard admits only the chat-traffic shapes (`chat--peer-msg` matches a message tagged in
+`*peer-tags*` — a chat line, a `/me` action, a file, a typing note, a history
+request/reply, or a shipped `:call`/`:result` closure), so GUI key/mouse messages, which
+share this process's mailbox, stay queued for the frontend's own poll. `*peer-tags*` is the
+single source of truth for that set — the same predicate that classifies GUI-poll traffic
+in `chat-update` gates the receive here. Presence rides on `(nodes)`, not the mailbox, so
+it needs no shape. Mirrors `ui/with-events`."
   (assoc display
     :poll (fn (ms)
             (let (msg (receive
-                        ([:chat p] [:peer [:chat p]])
-                        ([:action p] [:peer [:action p]])
-                        ([:dm p] [:peer [:dm p]])
-                        ([:file p] [:peer [:file p]])
-                        ([:typing from room] [:peer [:typing from room]])
-                        ([:want-history from] [:peer [:want-history from]])
-                        ([:history entries] [:peer [:history entries]])
-                        ([:dial-failed name] [:peer [:dial-failed name]])
-                        ([:call from label f] [:peer [:call from label f]])
-                        ([:result from label r] [:peer [:result from label r]])
+                        (m :when (chat--peer-msg m) [:peer m])
                         (after 0 nil)))
               (if (nil? msg) ((get display :poll) ms) msg)))))
 

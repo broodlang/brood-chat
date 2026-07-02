@@ -351,6 +351,7 @@ Rings the bell + badges when you'd otherwise miss it, and bumps the room's unrea
                   :file fname
                   :size size
                   :path saved
+                  :thumb (chat--thumb bytes fname)
                   :room room
                   :lc lc
                   :at (get p :at)})
@@ -397,10 +398,65 @@ deduped like a message; the bytes themselves are never persisted (only the metad
                                                        :file fname
                                                        :size size
                                                        :path path
+                                                       :thumb (chat--thumb bytes fname)
                                                        :room room
                                                        :lc lc
                                                        :at at})
                                       (str "file|" (chat--id from lc))))))))))
+
+;; inline image preview: an image file renders as half-block cells under its line ---
+
+; preview size: max width in terminal cells (= pixels), and height in cells — each cell
+; packs 2 vertical pixels via the upper-half-block `▀`, so the pixel box is 2× cells tall
+(def *img-cells-w* 32)
+(def *img-cells-h* 16)
+(def *image-exts* [".png" ".jpg" ".jpeg" ".gif" ".webp" ".bmp"])
+
+(defn chat--image? (name)
+  "Does `name` look like an inline-previewable image, by its extension (case-insensitive)?"
+  (let (parts (string-split (string-downcase (str name)) ".")
+        ext (if (> (count parts) 1) (str "." (last parts)) ""))
+    (member? ext *image-exts*)))
+
+(defn chat--thumb (bytes name)
+  "Decode a small preview `{:width :height :rgba}` from `bytes` when `name` looks like an image
+and it actually decodes, else nil. Capped to `*img-cells-w*`×(2·`*img-cells-h*`) pixels so a
+preview is a handful of rows. Total — a non-image or corrupt file just yields nil (no preview)."
+  (if (chat--image? name) (image-thumb bytes *img-cells-w* (* 2 *img-cells-h*)) nil))
+
+(defn chat--px (rgba bufw x y)
+  "The `[r g b]` of pixel (`x`,`y`) in a row-major RGBA8 buffer `bufw` pixels wide."
+  (let (o (* (+ (* y bufw) x) 4))
+    [(byte-at rgba o) (byte-at rgba (+ o 1)) (byte-at rgba (+ o 2))]))
+
+(defn chat--image-row-ops (rgba bufw w h cx cy)
+  "One visual line (row 0) of `w` half-block cells for pixel rows `2cy` (top → fg) and `2cy+1`
+(bottom → bg), each `▀` drawn at column `cx`+x. A missing bottom row (odd height) reuses the top."
+  (map (fn (x)
+         (let (top (chat--px rgba bufw x (* cy 2))
+               by (+ (* cy 2) 1)
+               bot (if (< by h) (chat--px rgba bufw x by) top))
+           (text 0 (+ cx x) "▀" {:fg top :bg bot})))
+    (range w)))
+
+(defn chat--image-rows (thumb cx maxw)
+  "Render a decoded `thumb` (`{:width :height :rgba}`) as a list of visual lines (each a list of
+row-0 ops), packing two pixel rows per cell with the upper-half-block `▀` (fg = top pixel, bg =
+bottom pixel). `cx` is the left indent, `maxw` the cell budget (each row is clipped to it). [] for
+a nil thumb or no room — so a non-image file simply shows its metadata line."
+  (if (or (nil? thumb) (< maxw 1))
+    []
+    (let (bufw (get thumb :width)
+          h (get thumb :height)
+          rgba (get thumb :rgba)
+          w (min bufw maxw)
+          rows (quot (+ h 1) 2))
+      (map (fn (cy) (chat--image-row-ops rgba bufw w h cx cy)) (range rows)))))
+
+(defn chat--strip-thumb (e)
+  "Drop the in-memory `:thumb` render cache from a log entry before persisting — the decoded
+RGBA is transient (re-derivable from the saved file), never written to the on-disk log."
+  (if (get e :thumb) (dissoc e :thumb) e))
 
 ;; --- closures over the wire -------------------------------------------------
 
@@ -1087,17 +1143,19 @@ stamp and chip are blanked so a run reads as one block."
                          {:fg :magenta :bold true}
                          txt
                          {:fg :magenta})
-      (= kind :file-in) (left (str "📎 " (get e :from) " ▸ ")
-                          {:fg :blue :bold true}
-                          (str (get e :file)
-                            "  "
-                            (chat--human-size (get e :size))
-                            (if (get e :path) (str "  → " (get e :path)) ""))
-                          {:fg :blue})
-      (= kind :file-out) (left "📎 you ▸ "
-                           {:fg :blue :bold true}
-                           (str (get e :file) "  " (chat--human-size (get e :size)))
-                           {:fg :blue})
+      (= kind :file-in) (concat (left (str "📎 " (get e :from) " ▸ ")
+                                  {:fg :blue :bold true}
+                                  (str (get e :file)
+                                    "  "
+                                    (chat--human-size (get e :size))
+                                    (if (get e :path) (str "  → " (get e :path)) ""))
+                                  {:fg :blue})
+                          (chat--image-rows (get e :thumb) cx (- cols cx)))
+      (= kind :file-out) (concat (left "📎 you ▸ "
+                                   {:fg :blue :bold true}
+                                   (str (get e :file) "  " (chat--human-size (get e :size)))
+                                   {:fg :blue})
+                           (chat--image-rows (get e :thumb) cx (- cols cx)))
       (= kind :result) [[(text 0
                            1
                            (chat--clamp (str (get e :from) " · " txt) (- cols 2))
@@ -1332,7 +1390,10 @@ accounted for (`:dirty` cleared, `:persisted-at` stamped)."
     (if (nil? path)
       m
       (do
-        (try (spit path (pr-str (into [] (filter chat--convo? (get m :log))))) (catch e nil))
+        (try
+          (spit path
+            (pr-str (into [] (map chat--strip-thumb (filter chat--convo? (get m :log))))))
+          (catch e nil))
         (assoc m :dirty false :persisted-at (now))))))
 
 (defn chat--maybe-persist! (m)

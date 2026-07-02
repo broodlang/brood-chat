@@ -689,6 +689,130 @@
       (assert= (get (last-entry m) :kind) :file-in))
     (assert= (chat/chat--peer-msg [:file {:from :b :file "x"}]) [:file {:from :b :file "x"}])))
 
+;; A hand-built 2×2 PNG (every pixel 10,20,30) for the inline-image tests — inlined as a
+;; byte vector so the tests touch no disk; `image-thumb` / `bytes` accept a vector.
+(def *png-2x2*
+  [137 80
+    78
+    71
+    13
+    10
+    26
+    10
+    0
+    0
+    0
+    13
+    73
+    72
+    68
+    82
+    0
+    0
+    0
+    2
+    0
+    0
+    0
+    2
+    8
+    2
+    0
+    0
+    0
+    253
+    212
+    154
+    115
+    0
+    0
+    0
+    16
+    73
+    68
+    65
+    84
+    120
+    156
+    99
+    224
+    18
+    145
+    3
+    34
+    6
+    8
+    5
+    0
+    6
+    78
+    0
+    241
+    56
+    99
+    50
+    129
+    0
+    0
+    0
+    0
+    73
+    69
+    78
+    68
+    174
+    66
+    96
+    130])
+
+(describe "chat: inline image preview"
+  (test "image? recognises image extensions, case-insensitively"
+    (is (chat/chat--image? "cat.png"))
+    (is (chat/chat--image? "Holiday.JPG"))
+    (is (chat/chat--image? "a.b.webp"))
+    (refute (chat/chat--image? "notes.txt"))
+    (refute (chat/chat--image? "archive.tar.gz"))
+    (refute (chat/chat--image? "noext")))
+
+  (test "image-rows renders a decoded thumb as ▀ half-block cells (fg/bg per cell)"
+    (let (thumb (image-thumb *png-2x2* 32 32)
+          rows (chat/chat--image-rows thumb 6 40))
+      ; 2px wide → 2 cells; 2px tall → 1 cell row (two pixels per cell)
+      (assert= (count rows) 1)
+      (assert= (count (first rows)) 2)
+      (let (op (first (first rows)))
+        (assert= (nth op 0) :text)
+        ; drawn at the indent column (cx = 6)
+        (assert= (nth op 2) 6)
+        (assert= (nth op 3) "▀")
+        ; the fixture is solid (10,20,30): top→fg, bottom→bg, both that colour
+        (assert= (get (nth op 4) :fg) [10 20 30])
+        (assert= (get (nth op 4) :bg) [10 20 30]))))
+
+  (test "image-rows clips to the width budget and no-ops on a nil thumb"
+    (let (thumb (image-thumb *png-2x2* 32 32))
+      (assert= (count (first (chat/chat--image-rows thumb 6 1))) 1))
+    (assert= (chat/chat--image-rows nil 6 40) []))
+
+  (test "receiving a real image caches a decoded :thumb; a non-image doesn't"
+    (let (m (chat/chat--recv-file (chat-init "a")
+              {:from :bob :file "pic.png" :bytes (bytes *png-2x2*) :room "#lobby" :lc 1 :at 1}))
+      (is (map? (get (last-entry m) :thumb)))
+      (assert= (get (get (last-entry m) :thumb) :width) 2))
+    (let (m (chat/chat--recv-file (chat-init "a")
+              {:from :bob
+               :file "notes.txt"
+               :bytes (string->utf8-bytes "hello")
+               :room "#lobby"
+               :lc 1
+               :at 1}))
+      (is (nil? (get (last-entry m) :thumb)))))
+
+  (test "strip-thumb drops the transient :thumb before persistence"
+    (assert= (chat/chat--strip-thumb {:kind :file-in :file "x" :thumb {:width 2}})
+      {:kind :file-in :file "x"})
+    (assert= (chat/chat--strip-thumb {:kind :me :text "hi"}) {:kind :me :text "hi"})))
+
 (describe "chat: view helpers"
   (test "rest-after returns the argument past the first space"
     (assert= (chat/chat--rest-after "/connect bob") "bob")

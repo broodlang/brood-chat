@@ -169,7 +169,7 @@ arrives both live and again via a history backfill."
 
 (defn chat--remember (m id)
   "Record `id` as seen, capped so the dedupe set can't grow without bound."
-  (assoc m :seen (take-last *log-cap* (concat (get m :seen []) [id]))))
+  (assoc m :seen (take-last *log-cap* (append (get m :seen []) [id]))))
 
 (defn chat--fresh-msg (m id lc fresh)
   "The dedupe gate every incoming stamped message passes through. When `(id, lc)` names a
@@ -213,7 +213,7 @@ pinging when you're staring right at it, while still alerting when you're away o
   (and (string? text)
     (string? name)
     (not (blank? name))
-    (string-contains? (string-downcase text) (str "@" (string-downcase name)))))
+    (includes? (lower text) (str "@" (lower name)))))
 
 (defn chat--bell ()
   "A short, quiet attention tone for a mention or DM — fire-and-forget, and a graceful
@@ -228,11 +228,11 @@ you're present, so a mention you're staring right at stays silent. Returns the m
 
 (defn chat--see-room (m room)
   "Register `room` in `:rooms` if it's new, so `/rooms` lists it."
-  (if (member? room (get m :rooms)) m (assoc m :rooms (concat (get m :rooms) [room]))))
+  (if (member? room (get m :rooms)) m (assoc m :rooms (append (get m :rooms) [room]))))
 
 (defn chat--room-name (s)
   "Normalise a room name: trim, force a leading `#`, and case-fold (rooms are one space)."
-  (let (t (string-downcase (trim s)))
+  (let (t (lower (trim s)))
     (if (starts-with? t "#") t (str "#" t))))
 
 (defn chat--public? (e)
@@ -253,8 +253,8 @@ DMs, system notes, and closure results show in every room."
 (defn chat--find-peer (m nick)
   "The connected peer node whose bare short name matches `nick` (case-insensitive), or
 nil — used to address a `/msg` at one node rather than broadcasting."
-  (let (want (string-downcase (chat--short nick)))
-    (first (filter (fn (p) (= (string-downcase (chat--short p)) want)) (get m :peers)))))
+  (let (want (lower (chat--short nick)))
+    (first (filter (fn (p) (= (lower (chat--short p)) want)) (get m :peers)))))
 
 ;; --- typing indicators (ephemeral presence) ---------------------------------
 
@@ -433,7 +433,7 @@ deduped like a message; the bytes themselves are never persisted (only the metad
 
 (defn chat--image? (name)
   "Does `name` look like an inline-previewable image, by its extension (case-insensitive)?"
-  (let (parts (string-split (string-downcase (str name)) ".")
+  (let (parts (string-split (lower (str name)) ".")
         ext (if (> (count parts) 1) (str "." (last parts)) ""))
     (member? ext *image-exts*)))
 
@@ -563,7 +563,7 @@ far behind you are."
   (let (scroll (get m :scroll)
         up (> scroll 0))
     (assoc m
-      :log (take-last *log-cap* (concat (get m :log) [entry]))
+      :log (take-last *log-cap* (append (get m :log) [entry]))
       :scroll (if up (+ scroll 1) 0)
       :unread (if up (+ (get m :unread 0) 1) (get m :unread 0)))))
 
@@ -589,7 +589,7 @@ Only public chat and `/me` lines travel, across every room — private DMs, syst
 and closure results are left out (a DM is nobody else's business)."
   (fold (fn (acc e)
           (if (chat--public? e)
-            (concat acc
+            (append acc
               [{:from (if (= (get e :kind) :me) (get m :name) (get e :from))
                 :text (get e :text)
                 :room (or (get e :room) *default-room*)
@@ -623,11 +623,11 @@ than crashing, since a peer's reply is untrusted input."
         ids (map (fn (r) (chat--id (or (get r :from) "?") (get r :lc))) sorted)
         m1 (fold chat--see-room m (map (fn (r) (or (get r :room) *default-room*)) sorted))
         log (get m1 :log)
-        block (if (empty? rows) [] (concat [{:kind :system :text "── earlier messages ──"}] rows)))
+        block (if (empty? rows) [] (append [{:kind :system :text "── earlier messages ──"}] rows)))
     (assoc m1
       :backfilled true
-      :seen (take-last *log-cap* (concat (get m1 :seen []) ids))
-      :log (take-last *log-cap* (concat (take 1 log) block (drop 1 log))))))
+      :seen (take-last *log-cap* (append (get m1 :seen []) ids))
+      :log (take-last *log-cap* (append (take 1 log) block (drop 1 log))))))
 
 (defn chat--request-history (m was now)
   "On the tick a peer first appears — and only until we've been backfilled once — ask
@@ -740,7 +740,7 @@ name is dialed synchronously (a Unix-socket connect is instant — it links righ
 the peer is up, so the mesh converges at once; `watch` needs a host:port); only if that fails
 — the peer isn't up yet — do we fall back to a bounded background retry that never
 blocks the UI, reporting `[:dial-failed]` if it finally gives up."
-  (if (string-contains? name ":")
+  (if (includes? name ":")
     (net/reconnect/watch name)
     (try
       (connect name)
@@ -1037,11 +1037,11 @@ model is kept. On quit, any pending write is flushed."
 
 (defn chat--chunks--acc (s width acc)
   (if (<= (display-width s) width)
-    (into [] (concat acc [s]))
+    (into [] (append acc [s]))
     (let (pre (first (chat--take-cells s width))
           pre (if (= pre "") (substring s 0 1) pre)
           rest (substring s (string-length pre)))
-      (chat--chunks--acc rest width (concat acc [pre])))))
+      (chat--chunks--acc rest width (append acc [pre])))))
 
 (defn chat--chunks (s width)
   "Hard-split an over-wide token `s` into ≤`width`-cell pieces, always making progress
@@ -1059,9 +1059,9 @@ splitting an over-long word. Returns at least one line (`\"\"` for empty text)."
                               head (take (max 0 (- (count acc) 1)) acc)
                               joined (if (= cur "") word (str cur " " word)))
                           (cond
-                            (<= (display-width joined) width) (concat head [joined])
-                            (<= (display-width word) width) (concat acc [word])
-                            :else (concat acc (chat--chunks word width)))))
+                            (<= (display-width joined) width) (append head [joined])
+                            (<= (display-width word) width) (append acc [word])
+                            :else (append acc (chat--chunks word width)))))
                   []
                   (chat--words text)))
       (if (empty? lines) [""] (into [] lines)))))
@@ -1111,9 +1111,9 @@ If so its name chip and stamp can be dropped, grouping a run under one heading."
         lines (chat--wrap body (max 1 (- cols bx)))
         mk (fn (i)
              (let (ln (nth lines i)
-                   lead (if (= i 0) (concat tsop [(text 0 cx chip chipface)]) [])
+                   lead (if (= i 0) (append tsop [(text 0 cx chip chipface)]) [])
                    body-op (if (= ln "") [] [(text 0 bx ln bodyface)]))
-               (concat lead body-op))))
+               (append lead body-op))))
     (map mk (range (count lines)))))
 
 (defn chat--vlines-me (cols cx tsop txt grouped?)
@@ -1125,7 +1125,7 @@ a grouped continuation of your previous line."
         mk (fn (i)
              (let (s (if (= i (- n 1)) (str (nth lines i) tag) (nth lines i))
                    x (max cx (- cols (display-width s) 1)))
-               (concat (if (= i 0) tsop []) [(text 0 x s {:fg :cyan :bold true})]))))
+               (append (if (= i 0) tsop []) [(text 0 x s {:fg :cyan :bold true})]))))
     (map mk (range n))))
 
 (defn chat--entry-vlines (e cols tz me now grouped?)
@@ -1168,7 +1168,7 @@ stamp and chip are blanked so a run reads as one block."
                          {:fg :magenta :bold true}
                          txt
                          {:fg :magenta})
-      (= kind :file-in) (concat (left (str "📎 " (get e :from) " ▸ ")
+      (= kind :file-in) (append (left (str "📎 " (get e :from) " ▸ ")
                                   {:fg :blue :bold true}
                                   (str (get e :file)
                                     "  "
@@ -1176,7 +1176,7 @@ stamp and chip are blanked so a run reads as one block."
                                     (if (get e :path) (str "  → " (get e :path)) ""))
                                   {:fg :blue})
                           (chat--image-rows (get e :thumb) cx (- cols cx)))
-      (= kind :file-out) (concat (left "📎 you ▸ "
+      (= kind :file-out) (append (left "📎 you ▸ "
                                    {:fg :blue :bold true}
                                    (str (get e :file) "  " (chat--human-size (get e :size)))
                                    {:fg :blue})
@@ -1212,10 +1212,10 @@ with a `•N` unread dot)."
                                r
                                (if (and (not cur) (> n 0)) (str "  •" n) ""))
                        :face (if cur {:bold true} (face :ui/dim))}))
-        people (concat [(hdr (str "PEOPLE  " (+ 1 (count peers)))) you] (map peer-line peers))
-        rooms (concat [{:text "" :face (face :ui/dim)} (hdr "ROOMS")]
+        people (append [(hdr (str "PEOPLE  " (+ 1 (count peers)))) you] (map peer-line peers))
+        rooms (append [{:text "" :face (face :ui/dim)} (hdr "ROOMS")]
                 (map room-line (get m :rooms))))
-    (concat people rooms)))
+    (append people rooms)))
 
 (defn chat--sidebar-ops (m panel-x sw rows)
   "Lay the sidebar lines down the right panel (rows 1 .. `rows`-3), each clamped to `sw`."
@@ -1313,7 +1313,7 @@ can never render out of bounds."
                :else " Tab · Enter send · /join /msg · PgUp/PgDn scroll · @nick pings · /help · Ctrl-C quit")
         prompt (str ptxt input))
     (apply frame
-      (concat [(clear) (bar 0 cols hdr {:face {:bg :blue :fg :white :bold true}})]
+      (append [(clear) (bar 0 cols hdr {:face {:bg :blue :fg :white :bold true}})]
         log-ops
         sep-ops
         side-ops
@@ -1378,7 +1378,7 @@ socket, same-machine only); `alice@host:port` → a **TCP** node listening at ho
 so peers on other machines can `(/connect alice@host:port)` — the same syntax you dial
 with. Anything without an `@host:port` stays local."
   (let (at (index-of input "@"))
-    (if (and (>= at 0) (string-contains? (substring input (+ at 1)) ":"))
+    (if (and (>= at 0) (includes? (substring input (+ at 1)) ":"))
       [(substring input 0 at) (substring input (+ at 1))]
       [input nil])))
 
@@ -1466,7 +1466,7 @@ registered. Nothing to restore leaves `m` untouched."
         :lc (max (get m1 :lc 0) maxlc)
         :seen (take-last *log-cap* ids)
         :log (take-last *log-cap*
-               (concat (take 1 log)
+               (append (take 1 log)
                  [{:kind :system :text "── restored from last session ──"}]
                  recs
                  (drop 1 log)))))))

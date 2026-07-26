@@ -8,7 +8,7 @@ joins its whole cluster — Brood's nodes form a transitive mesh (ADR-088), so t
 room is everyone reachable through it, not just the peer you dialed. A bare node name
 is a local (same-machine) node; a `name@host:port` name makes it a **TCP** node that
 remote peers can dial, so the room spans machines (the link is encrypted, ADR-089).
-Links are kept alive with `ensure-link` (auto-reconnect on drop), a bare local dial that
+Links are kept alive with `net/reconnect/watch` (auto-reconnect on drop), a bare local dial that
 finds no peer retries in the background, and a late joiner is caught up via a one-shot
 **history backfill** requested from a peer on join. `/join #room` moves you between
 channels (one runtime, many rooms; the view filters by room), `/msg ⟨nick⟩ ⟨text⟩` sends
@@ -60,6 +60,8 @@ work identically in the window and the terminal (it silently didn't, in the wind
   ; named text faces (:ui/header, :ui/dim, …)
   (:use editor/face))
 ; the pure emacs-style line editor driving the input line
+(require 'net/reconnect)
+
 (require 'editor/lineedit)
 ; reuse the stdlib's longest-common-prefix completion helper
 (require 'editor/highlight)
@@ -509,7 +511,7 @@ crashes the app or ships a broken closure. Returns the updated model."
 (defn chat--fresh-edit (history)
   "A fresh lineedit state for the input line, seeded with the newest-first message
 `history` (↑/↓ and C-r recall earlier sends)."
-  (editor/lineedit/lineedit--init "› " "" history))
+  (editor/lineedit/lineedit-init "› " "" history))
 
 (defn chat-init (name)
   "The starting model. `:name` is the display name shown on your messages (`/nick`
@@ -732,14 +734,14 @@ slow or absent peer never blocks the UI; success is surfaced by the tick reconci
             (catch e (do (sleep 200) (chat--dial-retry name (- n 1)))))))
 
 (defn chat--spawn-dialer (name)
-  "Dial `name`. A remote `name@host:port` goes to `ensure-link` (supervised, auto-
-reconnecting — the mesh doesn't re-heal, ADR-088). A bare local name is dialed
-synchronously (a Unix-socket connect is instant — it links right away when the peer is
-up, so the mesh converges at once; `ensure-link` needs a host:port); only if that fails
+  "Dial `name`. A remote `name@host:port` goes to `net/reconnect/watch` (supervised,
+exponential-backoff auto-reconnect — the mesh doesn't re-heal, ADR-088). A bare local
+name is dialed synchronously (a Unix-socket connect is instant — it links right away when
+the peer is up, so the mesh converges at once; `watch` needs a host:port); only if that fails
 — the peer isn't up yet — do we fall back to a bounded background retry that never
 blocks the UI, reporting `[:dial-failed]` if it finally gives up."
   (if (string-contains? name ":")
-    (ensure-link name)
+    (net/reconnect/watch name)
     (try
       (connect name)
       (catch e (spawn (fn () (chat--dial-retry name *dial-attempts*)))))))
@@ -930,11 +932,11 @@ keystroke (a string, `:up`, `[:mouse …]`) has no peer tag, so it's left for th
 word motion, ↑/↓ history, C-r reverse-search — the full emacs keymap). On `:submit`
 run the line and reset the editor (remembering it in history); `:cancel` (C-c) and
 `:eof` (C-d on an empty line) quit — mid-line C-d deletes forward, readline-style."
-  (let (edit (editor/lineedit/lineedit--handle (get m :edit) key)
+  (let (edit (editor/lineedit/lineedit-handle (get m :edit) key)
         done (get edit :done))
     (cond
       (= done :submit) (let (line (get edit :text)
-                             hist (editor/lineedit/lineedit--remember (get edit :hist) line))
+                             hist (editor/lineedit/lineedit-remember (get edit :hist) line))
                          ;; sending jumps back to the live bottom (:scroll 0)
                          (chat--submit (assoc m :edit (chat--fresh-edit hist) :scroll 0) line))
       (nil? done) (chat--emit-typing (assoc m :edit edit))
@@ -1248,7 +1250,7 @@ shows a `:scroll`-offset window bottom-aligned; `:scroll` is clamped here so an 
 can never render out of bounds."
   (let (edit (get m :edit)
         input (get edit :text)
-        ptxt (editor/lineedit/lineedit--display-prompt edit)
+        ptxt (editor/lineedit/lineedit-display-prompt edit)
         tz (get m :tz-offset)
         me (get m :name)
         room (get m :room)

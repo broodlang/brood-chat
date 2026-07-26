@@ -1,7 +1,8 @@
 ;; Tests for the chat module's pure core — the model, the update folds, command
 ;; dispatch, Tab completion and the view helpers. `(:use chat)` brings chat's public
-;; defs into scope; the internal `chat--` helpers stay private to the module (`:use`
-;; doesn't re-export the `--` names), so we reach them qualified as `chat/chat--…`.
+;; defs into scope; the internal `chat--` helpers are module-private (ADR-146), so this
+;; module grants itself access with `(:use-internals chat)` and reaches them qualified as
+;; `chat/chat--…` — the sanctioned route for a test module that tests the internals.
 ;; `(:use test)` brings the describe/test/assert=/is/refute macros. `nest test`
 ;; loads src/ first, so `chat` is available.
 ;;
@@ -12,7 +13,7 @@
 ;; The networked paths (broadcast, connect, mesh convergence, history backfill over
 ;; the wire) aren't exercised here — they need live nodes; see `repro/mesh.sh`,
 ;; `repro/tcp.sh`, and `repro/run.sh` for those regression checks.
-(defmodule chat-test (:use chat) (:use test))
+(defmodule chat-test (:use chat) (:use-internals chat) (:use test))
 
 (defn last-entry (m)
   "The most recent log entry of model `m`."

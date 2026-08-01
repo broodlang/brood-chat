@@ -308,7 +308,7 @@ reads as `0 B`."
     (cond
       (< b 1024) (str b " B")
       (< b 1048576) (str (quot b 1024) " KB")
-      :else (str (to-fixed (/ b 1048576.0) 1) " MB"))))
+      else (str (to-fixed (/ b 1048576.0) 1) " MB"))))
 
 (defn chat--safe-basename (name)
   "The final path component of `name` with every directory part stripped, so a peer-supplied
@@ -396,7 +396,7 @@ deduped like a message; the bytes themselves are never persisted (only the metad
                                                       " — max "
                                                       (chat--human-size *file-cap*)
                                                       ")")})
-        :else (let (m1 (chat--bump (chat--clear-alerts m))
+        else (let (m1 (chat--bump (chat--clear-alerts m))
                     lc (get m1 :lc)
                     at (now)
                     room (get m1 :room)
@@ -729,7 +729,7 @@ backoff up to `n` times, then tell the inbox it gave up. Runs in its own process
 slow or absent peer never blocks the UI; success is surfaced by the tick reconcile."
   (cond
     (<= n 0) (send (whereis :inbox) [:dial-failed name])
-    :else (try
+    else (try
             (connect name)
             (catch e (do (sleep 200) (chat--dial-retry name (- n 1)))))))
 
@@ -759,7 +759,7 @@ surfaces each peer — and requests its history — as the links come up."
     (chat--peer-known? m name) (chat--log m
                                  {:kind :system
                                   :text (str "already connected to " (chat--short name))})
-    :else (do
+    else (do
             (chat--spawn-dialer name)
             (chat--log m {:kind :system :text (str "connecting to " name " …")}))))
 
@@ -803,7 +803,7 @@ friendly usage note. The local echo is a `:dm-out`; the recipient logs a `:dm-in
       (or (blank? nick) (blank? text)) (chat--log m
                                          {:kind :system :text "usage: /msg ⟨nick⟩ ⟨message⟩"})
       (nil? node) (chat--log m {:kind :system :text (str "no connected peer named " nick)})
-      :else (let (m1 (chat--bump (chat--clear-alerts m))
+      else (let (m1 (chat--bump (chat--clear-alerts m))
                   lc (get m1 :lc)
                   at (now)
                   from (get m1 :name))
@@ -881,7 +881,7 @@ rest), so no input can break the session."
                                               (quot off 60))})))
     (starts-with? line "/run ") (chat--run-expr m (chat--rest-after line))
     (starts-with? line "/send ") (chat--send-file m (trim (chat--rest-after line)))
-    :else (chat--send-say m line false)))
+    else (chat--send-say m line false)))
 
 ;; --- Tab completion ---------------------------------------------------------
 
@@ -898,7 +898,7 @@ shared prefix fills as far as it can and lists the candidates in the log."
     (cond
       (empty? ms) m
       (= (count ms) 1) (assoc m :edit (chat--set-text edit (first ms)))
-      :else (chat--log (assoc m :edit (chat--set-text edit (editor/highlight/common-prefix ms)))
+      else (chat--log (assoc m :edit (chat--set-text edit (editor/highlight/common-prefix ms)))
               {:kind :system :text (str "matches: " (join "   " ms))}))))
 
 ;; --- input classification ---------------------------------------------------
@@ -924,7 +924,7 @@ keystroke (a string, `:up`, `[:mouse …]`) has no peer tag, so it's left for th
     (cond
       (= (first x) :peer) (nth x 1)
       (member? (first x) *peer-tags*) x
-      :else nil)
+      else nil)
     nil))
 
 (defn chat--edit-key (m key)
@@ -940,7 +940,7 @@ run the line and reset the editor (remembering it in history); `:cancel` (C-c) a
                          ;; sending jumps back to the live bottom (:scroll 0)
                          (chat--submit (assoc m :edit (chat--fresh-edit hist) :scroll 0) line))
       (nil? done) (chat--emit-typing (assoc m :edit edit))
-      :else (assoc m :done true))))
+      else (assoc m :done true))))
 
 (defn chat--scroll (m by)
   "Move the scrollback viewport by `by` visual rows (positive = toward older). Floors at
@@ -958,7 +958,7 @@ isn't one. PgUp/PgDn page by the log height; the mouse wheel nudges a few rows."
       (= input :page-down) (- page)
       (and (vector? input) (= (first input) :mouse) (= (second input) :scroll-up)) 3
       (and (vector? input) (= (first input) :mouse) (= (second input) :scroll-down)) -3
-      :else nil)))
+      else nil)))
 
 (defn chat-update (m input cols rows)
   "ui-run update: fold one input into the next model. Tab completes, Esc/✕ quit, PgUp/
@@ -980,7 +980,7 @@ model is kept. On quit, any pending write is flushed."
                      m (cond
                          (= input :blur) (assoc m :focused false)
                          (or (= input :tick) (not (nil? pm))) m
-                         :else (assoc m :focused true)))
+                         else (assoc m :focused true)))
                  (cond
                    ;; the tick reconciles the mesh, flushes a dirty log, and stamps :now
                    ;; so the pure view can render relative times ("2m") that stay fresh.
@@ -991,7 +991,7 @@ model is kept. On quit, any pending write is flushed."
                    (or (= input :escape) (= input :close)) (assoc m :done true)
                    (= input :tab) (chat--complete m)
                    (chat--enter? input) (chat--edit-key m :enter)
-                   :else (chat--edit-key m input)))
+                   else (chat--edit-key m input)))
                (catch e
                  (chat--log m
                    {:kind :system :text (str "⚠ recovered from a bad input: " (chat--err e))}))))
@@ -1015,7 +1015,7 @@ model is kept. On quit, any pending write is flushed."
   (cond
     (<= (display-width s) width) s
     (< width 1) ""
-    :else (str (first (chat--take-cells s (- width 1))) "…")))
+    else (str (first (chat--take-cells s (- width 1))) "…")))
 
 (defn chat--center (s cols)
   "The left column that centres `s` within `cols` (by display width)."
@@ -1061,7 +1061,7 @@ splitting an over-long word. Returns at least one line (`\"\"` for empty text)."
                           (cond
                             (<= (display-width joined) width) (append head [joined])
                             (<= (display-width word) width) (append acc [word])
-                            :else (append acc (chat--chunks word width)))))
+                            else (append acc (chat--chunks word width)))))
                   []
                   (chat--words text)))
       (if (empty? lines) [""] (into [] lines)))))
@@ -1084,7 +1084,7 @@ aligned; empty when the entry has no timestamp, or `HH:MM` when `now` is unset (
         (< d 60000) "  now"
         (< d 3600000) (pad-left (str (quot d 60000) "m") 5)
         (< d 86400000) (pad-left (str (quot d 3600000) "h") 5)
-        :else (pad-left (chat--hhmm at tz) 5)))))
+        else (pad-left (chat--hhmm at tz) 5)))))
 
 (defn chat--same-author? (p e)
   "Is `e` from the same author + kind as its predecessor `p`, and close in time (<5 min)?
@@ -1185,7 +1185,7 @@ stamp and chip are blanked so a run reads as one block."
                            1
                            (chat--clamp (str (get e :from) " · " txt) (- cols 2))
                            {:fg :magenta})]]
-      :else (let (s (chat--clamp (str "— " txt " —") (- cols 2)))
+      else (let (s (chat--clamp (str "— " txt " —") (- cols 2)))
               [[(text 0 (chat--center s cols) s (face :ui/dim))]]))))
 
 ;; the right-hand roster / rooms panel ---------------------------------------
@@ -1291,7 +1291,7 @@ can never render out of bounds."
                                              " and "
                                              (second typers)
                                              " are typing…")
-                      :else (str "✎ " (count typers) " people are typing…"))
+                      else (str "✎ " (count typers) " people are typing…"))
         hdr (str " ⬢ broodchat   "
               me
               "   ·   "
@@ -1310,7 +1310,7 @@ can never render out of bounds."
                          "/"
                          total)
                (not (blank? typing-note)) (str " " typing-note)
-               :else " Tab · Enter send · /join /msg · PgUp/PgDn scroll · @nick pings · /help · Ctrl-C quit")
+               else " Tab · Enter send · /join /msg · PgUp/PgDn scroll · @nick pings · /help · Ctrl-C quit")
         prompt (str ptxt input))
     (apply frame
       (append [(clear) (bar 0 cols hdr {:face {:bg :blue :fg :white :bold true}})]
@@ -1354,14 +1354,14 @@ scanning all of them; nil if none. Lets `nest run tui`, `nest run --name x --wit
     (empty? args) nil
     (member? (first args) *gui-args*) :gui
     (member? (first args) *tui-args*) :tui
-    :else (chat--mode-arg (rest args))))
+    else (chat--mode-arg (rest args))))
 
 (defn chat--name-arg (args)
   "The first launch arg that isn't a frontend token — the node name / dial identity."
   (cond
     (empty? args) nil
     (or (member? (first args) *gui-args*) (member? (first args) *tui-args*)) (chat--name-arg (rest args))
-    :else (first args)))
+    else (first args)))
 
 (defn chat--choose-mode (args)
   "Pick the frontend: a gui/tui launch arg if present, else ask on the terminal.
@@ -1456,7 +1456,7 @@ registered. Nothing to restore leaves `m` untouched."
                        (cond
                          (member? k [:dm-in :dm-out]) (str "dm|" base)
                          (member? k [:file-in :file-out]) (str "file|" base)
-                         :else base)))
+                         else base)))
                 recs)
           m1 (fold chat--see-room
                m

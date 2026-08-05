@@ -45,12 +45,12 @@ hand `ui-run`: `(gui-display)` vs `*term-display*`. The same frame paints to bot
 
 Peer traffic and keystrokes share one mailbox in GUI mode (`gui-open` delivers input
 there too), so we wrap the frontend's `:poll` with a *selective* receive
-(`chat--with-peers`, mirroring `ui/with-events`): a queued chat message surfaces as a
+(`chat-with-peers`, mirroring `ui/with-events`): a queued chat message surfaces as a
 `[:peer …]` input, otherwise we poll the frontend as usual. On the terminal the keyboard
 and the mailbox are separate sources, and the same wrapper drains both. The catch:
 the GUI frontend's *own* `:poll` is a catch-all `(receive (m m) …)` on that shared
 mailbox, so a peer message arriving while it's parked comes back **raw** (unwrapped),
-not as `[:peer …]`. So `chat--peer-msg` accepts both shapes — the wrapped one from our
+not as `[:peer …]`. So `chat-peer-msg` accepts both shapes — the wrapped one from our
 selective receive and the raw one from the GUI poll — which is what makes group chat
 work identically in the window and the terminal (it silently didn't, in the window)."
   ; the app framework: ui-run + the display frontends
@@ -177,7 +177,7 @@ arrives both live and again via a history backfill."
 (defn- chat-fresh-msg
   (m id lc fresh)
   "The dedupe gate every incoming stamped message passes through. When `(id, lc)` names a
-line we've already logged, only advance the Lamport clock (`chat--observe`) — no duplicate
+line we've already logged, only advance the Lamport clock (`chat-observe`) — no duplicate
 line, but the clock still moves so ordering stays monotonic; this is what collapses a live
 message and its later history echo to one. Otherwise remember `id`, merge the clock, and
 hand the updated model to `fresh` to fold the new line in. Centralises the invariant the
@@ -195,7 +195,7 @@ bottom, sent a line, or switched rooms)."
 (defn- chat-mark-dirty
   (m)
   "Note the conversation changed so the next tick flushes it to disk. The write itself is
-batched (`chat--maybe-persist!`), so a burst of messages costs one write, not one each."
+batched (`chat-maybe-persist!`), so a burst of messages costs one write, not one each."
   (assoc m :dirty true))
 
 (defn- chat-bump-room-unread
@@ -569,7 +569,7 @@ is the on-disk log path (nil until `main` names the node — pure tests leave it
 I/O); `:dirty`/`:persisted-at` batch those writes. `:incoming` is the dir received `/send`
 files are saved under (nil in pure tests, so no I/O). `:tick-ms` is the refresh beat — also
 how often peer traffic is drained, the mesh reconciled into `:peers`, and a dirty log
-flushed to disk (see `chat--reconcile` / `chat--maybe-persist!`)."
+flushed to disk (see `chat-reconcile` / `chat-maybe-persist!`)."
   {:name name
    :edit (chat-fresh-edit '())
    :peers []
@@ -616,7 +616,7 @@ far behind you are."
   (m now)
   "Pure core of presence: given the current peer-node list `now`, log every node
 that has joined or left since `(get m :peers)` and set `:peers` to `now`. Factored
-out of `chat--reconcile` so the join/leave diff is unit-testable without live nodes."
+out of `chat-reconcile` so the join/leave diff is unit-testable without live nodes."
   (let (was (get m :peers)
         joined (remove (fn (n) (member? n was)) now)
         left (remove (fn (n) (member? n now)) was)
@@ -679,7 +679,7 @@ than crashing, since a peer's reply is untrusted input."
   (m was now)
   "On the tick a peer first appears — and only until we've been backfilled once — ask
 each newcomer to replay the conversation so far. Asking every newcomer is self-healing:
-`chat--backfill` keeps only the first reply, so a lost or empty dump is covered by the
+`chat-backfill` keeps only the first reply, so a lost or empty dump is covered by the
 next. Returns `m` unchanged; the work is the `[:want-history …]` sends."
   (do
     (when (not (get m :backfilled))
@@ -741,7 +741,7 @@ never room-filtered, and (having arrived point-to-point) never replayed to anyon
 (defn- chat-handle-peer
   (m msg)
   "Fold an incoming peer message into the model (and answer `:call`/`:want-history` in
-place). Presence is handled by `chat--reconcile` off `(nodes)`, so the traffic here is
+place). Presence is handled by `chat-reconcile` off `(nodes)`, so the traffic here is
 chat lines, `/me` actions, DMs, history replay, and shipped closures (`:call`/`:result`).
 Every conversational shape is a map payload, so a partial or foreign message just has nil
 fields rather than failing to match."
@@ -803,7 +803,7 @@ blocks the UI, reporting `[:dial-failed]` if it finally gives up."
 (defn- chat-do-connect
   (m name)
   "Join peer `name`'s cluster. Guards the obvious mistakes (dialing yourself, or a peer
-already connected), then dials in the background (`chat--spawn-dialer`) so the UI never
+already connected), then dials in the background (`chat-spawn-dialer`) so the UI never
 blocks. The transitive mesh links us to everyone `name` knows; the tick reconcile
 surfaces each peer — and requests its history — as the links come up."
   (cond
@@ -980,16 +980,16 @@ shared prefix fills as far as it can and lists the candidates in the log."
   (k)
   "Treat Enter and its raw-mode aliases alike."
   (or (= k :enter) (= k :ctrl-j) (= k :ctrl-m)))
-;; The chat-protocol message tags — the shapes `chat--handle-peer` folds. Kept as a set
-;; so `chat--peer-msg` can spot a raw one no matter how the frontend surfaced it.
+;; The chat-protocol message tags — the shapes `chat-handle-peer` folds. Kept as a set
+;; so `chat-peer-msg` can spot a raw one no matter how the frontend surfaced it.
 (def *peer-tags*
   [:chat :action :dm :file :typing :want-history :history :dial-failed :call :result])
 
 (defn- chat-peer-msg
   (x)
   "If input `x` is an incoming peer message, return the inner `[:tag …]` to hand
-`chat--handle-peer`, else nil. Two shapes reach us: the terminal frontend never touches
-the mailbox, so our `chat--with-peers` selective receive is what pulls peer traffic and
+`chat-handle-peer`, else nil. Two shapes reach us: the terminal frontend never touches
+the mailbox, so our `chat-with-peers` selective receive is what pulls peer traffic and
 it arrives **wrapped** as `[:peer msg]`. The GUI frontend's `:poll`, though, is a
 catch-all `(receive (m m) …)` on the *same* mailbox that carries keystrokes — so a peer
 message that lands while it's parked comes back **raw** (`[:chat …]`, `[:history …]`, …),
@@ -1043,7 +1043,7 @@ isn't one. PgUp/PgDn page by the log height; the mouse wheel nudges a few rows."
   "ui-run update: fold one input into the next model. Tab completes, Esc/✕ quit, PgUp/
 PgDn and the mouse wheel scroll the backlog, an incoming peer message (wrapped `[:peer
 msg]` on the terminal, raw `[:chat …]`/`[:history …]`/… on the GUI — see
-`chat--peer-msg`) is handled in place, and every other key drives the lineedit input
+`chat-peer-msg`) is handled in place, and every other key drives the lineedit input
 line — typing, motion, kill/yank, history, reverse-search, Enter submit, C-c / empty-line
 C-d quit. `:tick` reconciles the mesh into `:peers` and flushes a dirty log to disk; a GUI
 `:blur` clears focus and any real keystroke sets it (so a mention only alerts when you're
@@ -1441,7 +1441,7 @@ can never render out of bounds."
   (display)
   "Wrap `display` so its `:poll` first returns any queued chat-protocol message as a
 `[:peer msg]` input, else polls the frontend as usual. A *selective* receive: the `:when`
-guard admits only the chat-traffic shapes (`chat--peer-msg` matches a message tagged in
+guard admits only the chat-traffic shapes (`chat-peer-msg` matches a message tagged in
 `*peer-tags*` — a chat line, a `/me` action, a file, a typing note, a history
 request/reply, or a shipped `:call`/`:result` closure), so GUI key/mouse messages, which
 share this process's mailbox, stay queued for the frontend's own poll. `*peer-tags*` is the

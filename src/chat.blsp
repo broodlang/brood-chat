@@ -59,12 +59,6 @@ work identically in the window and the terminal (it silently didn't, in the wind
   (:use editor/display)
   ; named text faces (:ui/header, :ui/dim, …)
   (:use editor/face))
-; the pure emacs-style line editor driving the input line
-(require 'net/reconnect)
-
-(require 'editor/lineedit)
-; reuse the stdlib's longest-common-prefix completion helper
-(require 'editor/highlight)
 (def *commands*
   ["/connect "
     "/join " "/msg " "/nick " "/me " "/tz " "/say-hi" "/run " "/send " "/nodes" "/rooms" "/help"
@@ -1184,7 +1178,7 @@ If so its name chip and stamp can be dropped, grouping a run under one heading."
     (member? (get e :kind) [:me :them :action :dm-in :dm-out])
     (= (get p :from) (get e :from))
     (let (a (get p :at) b (get e :at))
-      (if (and (number? a) (number? b)) (< (abs (- b a)) 300000) true))))
+      (if (and (number? a) (number? b)) (< (math/abs (- b a)) 300000) true))))
 
 (defn- chat-group-flags
   (entries)

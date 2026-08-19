@@ -46,7 +46,7 @@
   (println (str "READY " me))
   (let (m0 (chat/chat-init me)
         m1 (if (and prechat (not (blank? prechat)))
-             (fold (fn (mm ln) (chat/chat-submit mm ln)) m0 (string-split prechat "|"))
+             (fold (fn (mm ln) (chat/chat-submit mm ln)) m0 (string/split prechat "|"))
              m0)
         m2 (if (and dial (not (blank? dial))) (chat/chat-do-connect m1 dial) m1)
         ; converge + backfill

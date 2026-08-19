@@ -2,6 +2,7 @@
 (project
   :name "chat"
   :version "0.1.0"
+  :brood ">= 0.4.0"
   :main chat)
 
 ;; To depend on other Brood packages, add a :dependencies vector to the form

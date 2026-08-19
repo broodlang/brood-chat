@@ -33,7 +33,7 @@
 
 (defn type-line (m s)
   "Type string `s` into the model one character at a time."
-  (feed m (string->list s)))
+  (feed m (string/to-list s)))
 
 (describe "chat: model & input"
   (test "init seeds one system line and an empty input editor"
@@ -103,7 +103,7 @@
 
   (test "an ambiguous prefix fills the shared prefix and lists matches"
     (let (m (chat-update (type-line (chat-init "a") "/") :tab 80 24))
-      (is (starts-with? (input-text m) "/"))
+      (is (string/starts-with? (input-text m) "/"))
       (assert= (get (last-entry m) :kind) :system)))
 
   (test "no match leaves the line untouched"
@@ -278,7 +278,7 @@
   (test "a malformed /run is reported, not fatal, and ships nothing"
     (let (m (chat/chat-submit (chat-init "a") "/run (+ 1"))
       (assert= (get (last-entry m) :kind) :system)
-      (is (starts-with? (get (last-entry m) :text) "bad /run"))))
+      (is (string/starts-with? (get (last-entry m) :text) "bad /run"))))
 
   (test "a well-formed /run logs that it shipped"
     (let (m (chat/chat-submit (chat-init "a") "/run (+ 1 2)"))
@@ -317,14 +317,14 @@
 
   (test "sending a line jumps back to the live bottom"
     (let (m0 (chat-update (chat-init "a") :page-up 80 24)
-          m1 (feed m0 (string->list "hi"))
+          m1 (feed m0 (string/to-list "hi"))
           m2 (chat-update m1 :enter 80 24))
       (assert= (get m2 :scroll) 0))))
 
 (describe "chat: help & clear"
   (test "/help logs the command summary"
     (let (m (chat/chat-submit (chat-init "a") "/help"))
-      (is (starts-with? (get (last-entry m) :text) "commands:"))))
+      (is (string/starts-with? (get (last-entry m) :text) "commands:"))))
 
   (test "/clear wipes the log and returns to live"
     (let (m (chat/chat-submit (assoc (chat-init "a") :scroll 4) "/clear"))

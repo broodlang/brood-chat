@@ -8,7 +8,7 @@ joins its whole cluster — Brood's nodes form a transitive mesh (ADR-088), so t
 room is everyone reachable through it, not just the peer you dialed. A bare node name
 is a local (same-machine) node; a `name@host:port` name makes it a **TCP** node that
 remote peers can dial, so the room spans machines (the link is encrypted, ADR-089).
-Links are kept alive with `net/reconnect/watch` (auto-reconnect on drop), a bare local dial that
+Links are kept alive with `reconnect/watch` (auto-reconnect on drop), a bare local dial that
 finds no peer retries in the background, and a late joiner is caught up via a one-shot
 **history backfill** requested from a peer on join. `/join #room` moves you between
 channels (one runtime, many rooms; the view filters by room), `/msg ⟨nick⟩ ⟨text⟩` sends
@@ -782,14 +782,14 @@ slow or absent peer never blocks the UI; success is surfaced by the tick reconci
 
 (defn- chat-spawn-dialer
   (name)
-  "Dial `name`. A remote `name@host:port` goes to `net/reconnect/watch` (supervised,
+  "Dial `name`. A remote `name@host:port` goes to `reconnect/watch` (supervised,
 exponential-backoff auto-reconnect — the mesh doesn't re-heal, ADR-088). A bare local
 name is dialed synchronously (a Unix-socket connect is instant — it links right away when
 the peer is up, so the mesh converges at once; `watch` needs a host:port); only if that fails
 — the peer isn't up yet — do we fall back to a bounded background retry that never
 blocks the UI, reporting `[:dial-failed]` if it finally gives up."
   (if (includes? name ":")
-    (net/reconnect/watch name)
+    (reconnect/watch name)
     (try
       (connect name)
       (catch e (spawn (fn () (chat-dial-retry name *dial-attempts*)))))))

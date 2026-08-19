@@ -81,7 +81,7 @@ work identically in the window and the terminal (it silently didn't, in the wind
   (e)
   "A short, one-line printable form of a caught error, for a friendly log line."
   (let (s (str e))
-    (if (> (string-length s) 160) (str (substring s 0 160) "…") s)))
+    (if (> (string/length s) 160) (str (string/substring s 0 160) "…") s)))
 
 ;; --- addressing -------------------------------------------------------------
 
@@ -107,18 +107,18 @@ stringifies with (`:alice@host` → `\"alice@host\"`); a string passes through."
 remote `bob@host:port`. Used to compare/display names regardless of qualification."
   (let (s (chat-node-str n)
         at (index-of s "@"))
-    (if (< at 0) s (substring s 0 at))))
+    (if (< at 0) s (string/substring s 0 at))))
 
 (defn- chat-names
   (peers)
   "Render the peer list for the `/nodes` line."
-  (if (empty? peers) "(none yet)" (join ", " (map chat-node-str peers))))
+  (if (empty? peers) "(none yet)" (string/join ", " (map chat-node-str peers))))
 
 (defn- chat-rest-after
   (line)
   "The line's text after its first space (the argument to a /command)."
   (let (sp (index-of line " "))
-    (if (< sp 0) "" (substring line (+ sp 1)))))
+    (if (< sp 0) "" (string/substring line (+ sp 1)))))
 
 ;; --- timestamps -------------------------------------------------------------
 
@@ -215,8 +215,8 @@ pinging when you're staring right at it, while still alerting when you're away o
   "Does `text` @-mention `name`? Case-insensitive, so '@Ada …' pings ada."
   (and (string? text)
     (string? name)
-    (not (blank? name))
-    (includes? (lower text) (str "@" (lower name)))))
+    (not (string/blank? name))
+    (includes? (string/lower text) (str "@" (string/lower name)))))
 
 (defn- chat-bell
   ()
@@ -239,8 +239,8 @@ you're present, so a mention you're staring right at stays silent. Returns the m
 (defn- chat-room-name
   (s)
   "Normalise a room name: trim, force a leading `#`, and case-fold (rooms are one space)."
-  (let (t (lower (trim s)))
-    (if (starts-with? t "#") t (str "#" t))))
+  (let (t (string/lower (string/trim s)))
+    (if (string/starts-with? t "#") t (str "#" t))))
 
 (defn- chat-public?
   (e)
@@ -264,8 +264,8 @@ DMs, system notes, and closure results show in every room."
   (m nick)
   "The connected peer node whose bare short name matches `nick` (case-insensitive), or
 nil — used to address a `/msg` at one node rather than broadcasting."
-  (let (want (lower (chat-short nick)))
-    (first (filter (fn (p) (= (lower (chat-short p)) want)) (get m :peers)))))
+  (let (want (string/lower (chat-short nick)))
+    (first (filter (fn (p) (= (string/lower (chat-short p)) want)) (get m :peers)))))
 
 ;; --- typing indicators (ephemeral presence) ---------------------------------
 
@@ -273,7 +273,7 @@ nil — used to address a `/msg` at one node rather than broadcasting."
   (text)
   "Is `text` a real message being composed — non-blank and not a slash-command? Only these
 advertise 'typing…'; you don't broadcast a typing note while entering a command."
-  (and (not (blank? text)) (not (starts-with? text "/"))))
+  (and (not (string/blank? text)) (not (string/starts-with? text "/"))))
 
 (defn- chat-emit-typing
   (m)
@@ -332,15 +332,15 @@ reads as `0 B`."
   "The final path component of `name` with every directory part stripped, so a peer-supplied
 name can't escape the incoming dir (`../../etc/passwd` → `passwd`). A degenerate name (empty,
 `.`, `..`, a trailing slash) falls back to `file`."
-  (let (parts (string-split (str name) "/")
-        base (trim (or (last parts) "")))
-    (if (or (blank? base) (= base ".") (= base "..")) "file" base)))
+  (let (parts (string/split (str name) "/")
+        base (string/trim (or (last parts) "")))
+    (if (or (string/blank? base) (= base ".") (= base "..")) "file" base)))
 
 (defn- chat-parent-dir
   (path)
   "The directory part of `path` — everything before the last `/` (\"\" when there is none)."
-  (let (parts (string-split (str path) "/"))
-    (join "/" (take (max 0 (- (count parts) 1)) parts))))
+  (let (parts (string/split (str path) "/"))
+    (string/join "/" (take (max 0 (- (count parts) 1)) parts))))
 
 (defn- chat-file-target
   (m from name)
@@ -361,8 +361,8 @@ I/O error, all swallowed (a transfer is a convenience, never a reason to crash).
   (if (and target (bytes? bytes) (<= (byte-length bytes) *file-cap*))
     (try
       (do
-        (make-dir (chat-parent-dir target))
-        (spit-bytes target bytes)
+        (file/mkdir (chat-parent-dir target))
+        (file/spit-bytes target bytes)
         target)
       (catch e nil))
     nil))
@@ -406,9 +406,9 @@ Rings the bell + badges when you'd otherwise miss it, and bumps the room's unrea
 check it against `*file-cap*`, broadcast the bytes as `[:file …]`, and echo a `:file-out` line.
 A blank arg, an unreadable file, or one over the cap is a friendly note, not a send. Stamped +
 deduped like a message; the bytes themselves are never persisted (only the metadata line is)."
-  (if (blank? path)
+  (if (string/blank? path)
     (chat-log m {:kind :system :text "usage: /send ⟨path⟩"})
-    (let (bytes (try (slurp-bytes path) (catch e nil)))
+    (let (bytes (try (file/slurp-bytes path) (catch e nil)))
       (cond
         (nil? bytes) (chat-log m {:kind :system :text (str "can't read " path)})
         (> (byte-length bytes) *file-cap*)
@@ -460,7 +460,7 @@ deduped like a message; the bytes themselves are never persisted (only the metad
 (defn- chat-image?
   (name)
   "Does `name` look like an inline-previewable image, by its extension (case-insensitive)?"
-  (let (parts (string-split (lower (str name)) ".")
+  (let (parts (string/split (string/lower (str name)) ".")
         ext (if (> (count parts) 1) (str "." (last parts)) ""))
     (member? ext *image-exts*)))
 
@@ -801,7 +801,7 @@ already connected), then dials in the background (`chat-spawn-dialer`) so the UI
 blocks. The transitive mesh links us to everyone `name` knows; the tick reconcile
 surfaces each peer — and requests its history — as the links come up."
   (cond
-    (blank? name) m
+    (string/blank? name) m
     (= (chat-short name) (chat-short (node-name)))
       (chat-log m
         {:kind :system
@@ -824,7 +824,7 @@ surfaces each peer — and requests its history — as the links come up."
 locally, and stamp it with a fresh Lamport time + wall clock. Its id is remembered so a
 copy reflected back through a peer's history backfill is de-duplicated. Sending catches you
 up (clears the unread/mention alerts) and persists. A blank line is a no-op."
-  (if (blank? text)
+  (if (string/blank? text)
     m
     (let (m1 (chat-bump (chat-clear-alerts m))
           lc (get m1 :lc)
@@ -850,11 +850,11 @@ up (clears the unread/mention alerts) and persists. A blank line is a no-op."
 Resolves `nick` against connected peers by short name; a missing peer or empty body is a
 friendly usage note. The local echo is a `:dm-out`; the recipient logs a `:dm-in`."
   (let (sp (index-of rest " ")
-        nick (if (< sp 0) (trim rest) (trim (substring rest 0 sp)))
-        text (if (< sp 0) "" (trim (substring rest (+ sp 1))))
+        nick (if (< sp 0) (string/trim rest) (string/trim (string/substring rest 0 sp)))
+        text (if (< sp 0) "" (string/trim (string/substring rest (+ sp 1))))
         node (chat-find-peer m nick))
     (cond
-      (or (blank? nick) (blank? text))
+      (or (string/blank? nick) (string/blank? text))
         (chat-log m
           {:kind :system :text "usage: /msg ⟨nick⟩ ⟨message⟩"})
       (nil? node) (chat-log m {:kind :system :text (str "no connected peer named " nick)})
@@ -878,7 +878,7 @@ friendly usage note. The local echo is a `:dm-out`; the recipient logs a `:dm-in
   (m arg)
   "Switch to (and create on demand) room `arg`. Pins to the live bottom and clears alerts
 so the new room starts fresh; the room is registered so `/rooms` lists it."
-  (if (blank? arg)
+  (if (string/blank? arg)
     (chat-log m {:kind :system :text "usage: /join ⟨#room⟩"})
     (let (room (chat-room-name arg)
           ru (assoc (get m :room-unread {}) room 0))
@@ -890,8 +890,8 @@ so the new room starts fresh; the room is registered so `/rooms` lists it."
   (s)
   "Parse a `/tz` argument (whole hours east of UTC — `+2`, `-5`, `0`) into minutes, or
 nil if it isn't a plain integer."
-  (let (t (trim s)
-        body (if (starts-with? t "+") (substring t 1) t)
+  (let (t (string/trim s)
+        body (if (string/starts-with? t "+") (string/substring t 1) t)
         h (try (read-string body) (catch e nil)))
     (if (int? h) (* h 60) nil)))
 
@@ -902,7 +902,7 @@ echoed into our own log). The caller has already reset the input editor. Every b
 total — a bad argument logs a note rather than throwing (and `chat-update` guards the
 rest), so no input can break the session."
   (cond
-    (blank? line) m
+    (string/blank? line) m
     (= line "/quit") (assoc m :done true)
     (= line "/help") (chat-log m {:kind :system :text *help*})
     (= line "/clear") (assoc m :log [{:kind :system :text "— cleared —"}] :scroll 0)
@@ -913,26 +913,26 @@ rest), so no input can break the session."
       (chat-log m
         {:kind :system
          :text (str "rooms: "
-                 (join "  " (get m :rooms))
+                 (string/join "  " (get m :rooms))
                  "   (you're in "
                  (get m :room)
                  ")")})
-    (starts-with? line "/join ") (chat-do-join m (chat-rest-after line))
-    (starts-with? line "/msg ") (chat-send-dm m (chat-rest-after line))
+    (string/starts-with? line "/join ") (chat-do-join m (chat-rest-after line))
+    (string/starts-with? line "/msg ") (chat-send-dm m (chat-rest-after line))
     (= line "/say-hi")
       (do
         (chat-say-hi)
         (chat-log m
           {:kind :system :text "shipped /say-hi closure to all peers"}))
-    (starts-with? line "/connect ") (chat-do-connect m (chat-rest-after line))
-    (starts-with? line "/nick ")
+    (string/starts-with? line "/connect ") (chat-do-connect m (chat-rest-after line))
+    (string/starts-with? line "/nick ")
       (let (nk (chat-rest-after line))
-        (if (blank? nk)
+        (if (string/blank? nk)
           m
           (chat-log (assoc m :name nk)
             {:kind :system :text (str "you are now " nk)})))
-    (starts-with? line "/me ") (chat-send-say m (chat-rest-after line) true)
-    (starts-with? line "/tz ")
+    (string/starts-with? line "/me ") (chat-send-say m (chat-rest-after line) true)
+    (string/starts-with? line "/tz ")
       (let (off (chat-parse-tz (chat-rest-after line)))
         (if (nil? off)
           (chat-log m
@@ -943,8 +943,8 @@ rest), so no input can break the session."
              :text (str "timezone set to UTC"
                      (if (>= off 0) "+" "")
                      (quot off 60))})))
-    (starts-with? line "/run ") (chat-run-expr m (chat-rest-after line))
-    (starts-with? line "/send ") (chat-send-file m (trim (chat-rest-after line)))
+    (string/starts-with? line "/run ") (chat-run-expr m (chat-rest-after line))
+    (string/starts-with? line "/send ") (chat-send-file m (string/trim (chat-rest-after line)))
     else (chat-send-say m line false)))
 
 ;; --- Tab completion ---------------------------------------------------------
@@ -952,7 +952,7 @@ rest), so no input can break the session."
 (defn- chat-set-text
   (edit s)
   "The lineedit state `edit` with its line replaced by `s`, point at the end."
-  (assoc edit :text s :point (string-length s) :hist-idx -1))
+  (assoc edit :text s :point (string/length s) :hist-idx -1))
 
 (defn- chat-complete
   (m)
@@ -960,13 +960,13 @@ rest), so no input can break the session."
 shared prefix fills as far as it can and lists the candidates in the log."
   (let (edit (get m :edit)
         buf (get edit :text)
-        ms (filter (fn (c) (starts-with? c buf)) *commands*))
+        ms (filter (fn (c) (string/starts-with? c buf)) *commands*))
     (cond
       (empty? ms) m
       (= (count ms) 1) (assoc m :edit (chat-set-text edit (first ms)))
       else
         (chat-log (assoc m :edit (chat-set-text edit (editor/highlight/common-prefix ms)))
-          {:kind :system :text (str "matches: " (join "   " ms))}))))
+          {:kind :system :text (str "matches: " (string/join "   " ms))}))))
 
 ;; --- input classification ---------------------------------------------------
 
@@ -1080,9 +1080,9 @@ model is kept. On quit, any pending write is flushed."
 
 (defn- chat-take-cells-go
   (s width i)
-  (if (or (>= i (string-length s))
-        (> (display-width (substring s 0 (+ i 1))) width))
-    [(substring s 0 i) (substring s i)]
+  (if (or (>= i (string/length s))
+        (> (display-width (string/substring s 0 (+ i 1))) width))
+    [(string/substring s 0 i) (string/substring s i)]
     (chat-take-cells-go s width (+ i 1))))
 
 (defn- chat-clamp
@@ -1102,9 +1102,9 @@ model is kept. On quit, any pending write is flushed."
   (name-in)
   "A stable accent colour for `name-in` (string or node keyword), by its first letter."
   (let (name (str name-in))
-    (if (blank? name)
+    (if (string/blank? name)
       :green
-      (let (i (index-of "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ" (substring name 0 1)))
+      (let (i (index-of "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ" (string/substring name 0 1)))
         (nth *peer-colors* (rem (if (< i 0) 0 i) (count *peer-colors*)))))))
 
 ;; word-wrapping (display-cell aware) ----------------------------------------
@@ -1112,15 +1112,15 @@ model is kept. On quit, any pending write is flushed."
 (defn- chat-words
   (text)
   "Split `text` on spaces, dropping empties (runs of spaces collapse)."
-  (filter (fn (w) (not (= w ""))) (string-split text " ")))
+  (filter (fn (w) (not (= w ""))) (string/split text " ")))
 
 (defn- chat-chunks-acc
   (s width acc)
   (if (<= (display-width s) width)
     (into [] (append acc [s]))
     (let (pre (first (chat-take-cells s width))
-          pre (if (= pre "") (substring s 0 1) pre)
-          rest (substring s (string-length pre)))
+          pre (if (= pre "") (string/substring s 0 1) pre)
+          rest (string/substring s (string/length pre)))
       (chat-chunks-acc rest width (append acc [pre])))))
 
 (defn- chat-chunks
@@ -1153,7 +1153,7 @@ splitting an over-long word. Returns at least one line (`\"\"` for empty text)."
 (defn- chat-blank
   (w)
   "A run of `w` spaces (empty for w≤0) — used to hold a grouped line's chip column."
-  (if (> w 0) (string-repeat " " w) ""))
+  (if (> w 0) (string/repeat " " w) ""))
 
 (defn- chat-stamp-str
   (at now tz)
@@ -1164,11 +1164,11 @@ aligned; empty when the entry has no timestamp, or `HH:MM` when `now` is unset (
     ""
     (let (d (- now at))
       (cond
-        (or (<= now 0) (< d 0)) (pad-left (chat-hhmm at tz) 5)
+        (or (<= now 0) (< d 0)) (string/pad-left (chat-hhmm at tz) 5)
         (< d 60000) "  now"
-        (< d 3600000) (pad-left (str (quot d 60000) "m") 5)
-        (< d 86400000) (pad-left (str (quot d 3600000) "h") 5)
-        else (pad-left (chat-hhmm at tz) 5)))))
+        (< d 3600000) (string/pad-left (str (quot d 60000) "m") 5)
+        (< d 86400000) (string/pad-left (str (quot d 3600000) "h") 5)
+        else (string/pad-left (chat-hhmm at tz) 5)))))
 
 (defn- chat-same-author?
   (p e)
@@ -1228,7 +1228,7 @@ stamp and chip are blanked so a run reads as one block."
         txt (str (get e :text))
         cx 6
         tss (if grouped? "" (chat-stamp-str (get e :at) now tz))
-        tsop (if (blank? tss) [] [(text 0 0 tss (face :ui/dim))])
+        tsop (if (string/blank? tss) [] [(text 0 0 tss (face :ui/dim))])
         pc (fn () (chat-peer-color (get e :from)))
         hit (chat-mentions? txt me)
         left (fn (chip chipface body bodyface)
@@ -1413,7 +1413,7 @@ can never render out of bounds."
                    end
                    "/"
                    total)
-               (not (blank? typing-note)) (str " " typing-note)
+               (not (string/blank? typing-note)) (str " " typing-note)
                else
                  " Tab · Enter send · /join /msg · PgUp/PgDn scroll · @nick pings · /help · Ctrl-C quit")
         prompt (str ptxt input))
@@ -1491,14 +1491,14 @@ socket, same-machine only); `alice@host:port` → a **TCP** node listening at ho
 so peers on other machines can `(/connect alice@host:port)` — the same syntax you dial
 with. Anything without an `@host:port` stays local."
   (let (at (index-of input "@"))
-    (if (and (>= at 0) (includes? (substring input (+ at 1)) ":"))
-      [(substring input 0 at) (substring input (+ at 1))]
+    (if (and (>= at 0) (includes? (string/substring input (+ at 1)) ":"))
+      [(string/substring input 0 at) (string/substring input (+ at 1))]
       [input nil])))
 
 (defn- chat-arg-or-ask
   (val prompt)
   "Use startup arg `val` when it's a non-blank string, else prompt for it on the terminal."
-  (if (and (string? val) (not (blank? val))) val (do (print prompt) (read-line))))
+  (if (and (string? val) (not (string/blank? val))) val (do (print prompt) (read-line))))
 
 ;; --- persistence: keep the conversation across restarts ---------------------
 
@@ -1527,7 +1527,7 @@ accounted for (`:dirty` cleared, `:persisted-at` stamped)."
       m
       (do
         (try
-          (spit path
+          (file/spit path
             (pr-str (into [] (map chat-strip-thumb (filter chat-convo? (get m :log))))))
           (catch e nil))
         (assoc m :dirty false :persisted-at (now))))))
@@ -1555,8 +1555,8 @@ couple of seconds of messages aren't lost. A no-op when the log isn't dirty."
   "Read persisted conversational entries from `path`, or [] when it's absent or corrupt
 (untrusted-on-disk, so a bad file degrades to a fresh start rather than a crash)."
   (try
-    (if (file-exists? path)
-      (let (data (read-string (slurp path)))
+    (if (file/exists? path)
+      (let (data (read-string (file/slurp path)))
         (if (or (list? data) (vector? data)) (into [] (filter map? data)) []))
       [])
     (catch e [])))
@@ -1601,7 +1601,7 @@ Wires up persistence: the node's saved conversation is loaded and its `:store` p
 lines survive a restart."
   (register :inbox (self))
   (let (store (chat-store-path (node-name))
-        loaded (do (try (make-dir (chat-store-dir)) (catch e nil)) (chat-load-entries store))
+        loaded (do (try (file/mkdir (chat-store-dir)) (catch e nil)) (chat-load-entries store))
         ;; :persisted-at now so the just-loaded data isn't rewritten on the first tick
         m0 (chat-restore (assoc (chat-init name)
                            :store store
@@ -1628,7 +1628,7 @@ skip the prompts: `nest run tui alice`, `nest run gui alice@0.0.0.0:9001`, or
       (do (chat-run-app mode (chat-short (node-name)) nil) (println "bye"))
       (let (raw (chat-arg-or-ask (chat-name-arg args)
                   "node name (add @host:port to accept remote peers): "))
-        (if (or (nil? raw) (blank? raw))
+        (if (or (nil? raw) (string/blank? raw))
           (println "no node name — bye")
           (let (id (chat-parse-identity raw)
                 nm (first id)

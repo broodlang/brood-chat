@@ -325,7 +325,7 @@ reads as `0 B`."
     (cond
       (< b 1024) (str b " B")
       (< b 1048576) (str (quot b 1024) " KB")
-      else (str (to-fixed (/ b 1048576.0) 1) " MB"))))
+      else (str (->fixed (/ b 1048576.0) 1) " MB"))))
 
 (defn- chat-safe-basename
   (name)

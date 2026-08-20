@@ -33,7 +33,7 @@
 
 (defn type-line (m s)
   "Type string `s` into the model one character at a time."
-  (feed m (string/to-list s)))
+  (feed m (string/->list s)))
 
 (describe "chat: model & input"
   (test "init seeds one system line and an empty input editor"
@@ -317,7 +317,7 @@
 
   (test "sending a line jumps back to the live bottom"
     (let (m0 (chat-update (chat-init "a") :page-up 80 24)
-          m1 (feed m0 (string/to-list "hi"))
+          m1 (feed m0 (string/->list "hi"))
           m2 (chat-update m1 :enter 80 24))
       (assert= (get m2 :scroll) 0))))
 

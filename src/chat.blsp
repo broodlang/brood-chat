@@ -1104,7 +1104,8 @@ model is kept. On quit, any pending write is flushed."
   (let (name (str name-in))
     (if (string/blank? name)
       :green
-      (let (i (index-of "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ" (string/substring name 0 1)))
+      (let (i (index-of "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                (string/substring name 0 1)))
         (nth *peer-colors* (rem (if (< i 0) 0 i) (count *peer-colors*)))))))
 
 ;; word-wrapping (display-cell aware) ----------------------------------------

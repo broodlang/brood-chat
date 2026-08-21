@@ -382,7 +382,7 @@
   (test "/join switches room, registers it, and pins to the bottom"
     (let (m (chat/chat-submit (assoc (chat-init "a") :scroll 5) "/join #dev"))
       (assert= (get m :room) "#dev")
-      (is (member? "#dev" (get m :rooms)))
+      (is (includes? (get m :rooms) "#dev"))
       (assert= (get m :scroll) 0)))
 
   (test "a bare room name gains a leading # and is case-folded"
@@ -540,11 +540,11 @@
               :rooms ["#lobby" "#dev"]
               :room-unread {"#lobby" 3})
           lines (map (fn (l) (get l :text)) (chat/chat-sidebar-lines m)))
-      (is (member? "● ada  (you)" lines))
-      (is (member? "● bob" lines))
+      (is (includes? lines "● ada  (you)"))
+      (is (includes? lines "● bob"))
       ; current room marked
-      (is (member? "▸ #dev" lines))
-      (is (member? "  #lobby  •3" lines))))
+      (is (includes? lines "▸ #dev"))
+      (is (includes? lines "  #lobby  •3"))))
   (test "receiving in another room bumps that room's unread; /join clears it"
     (let (m (chat/chat-handle-peer (assoc (chat-init "a") :room "#lobby")
               [:chat {:from :bob :text "hi" :room "#dev" :lc 1}]))
@@ -579,7 +579,7 @@
 
   (test "handle-peer routes a raw [:typing …] into the model"
     (let (m (chat/chat-handle-peer (chat-init "ada") [:typing "bob" "#lobby"]))
-      (is (member? "bob" (chat/chat-typing-active m (now))))))
+      (is (includes? (chat/chat-typing-active m (now)) "bob"))))
 
   (test "peer-msg recognises a raw [:typing …]"
     (assert= (chat/chat-peer-msg [:typing "bob" "#lobby"]) [:typing "bob" "#lobby"]))

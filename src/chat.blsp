@@ -161,7 +161,7 @@ arrives both live and again via a history backfill."
 (defn- chat-seen?
   (m id)
   "Have we already logged the message identified by `id`?"
-  (member? id (get m :seen [])))
+  (includes? (get m :seen []) id))
 
 (defn- chat-remember
   (m id)
@@ -234,7 +234,7 @@ you're present, so a mention you're staring right at stays silent. Returns the m
 (defn- chat-see-room
   (m room)
   "Register `room` in `:rooms` if it's new, so `/rooms` lists it."
-  (if (member? room (get m :rooms)) m (assoc m :rooms (append (get m :rooms) [room]))))
+  (if (includes? (get m :rooms) room) m (assoc m :rooms (append (get m :rooms) [room]))))
 
 (defn- chat-room-name
   (s)
@@ -246,19 +246,19 @@ you're present, so a mention you're staring right at stays silent. Returns the m
   (e)
   "A room-scoped conversational entry — a chat line or a `/me` action, mine or a peer's.
 DMs and system/result notes are excluded (DMs are private; notes are local, not replayed)."
-  (member? (get e :kind) [:me :them :action]))
+  (includes? [:me :them :action] (get e :kind)))
 
 (defn- chat-convo?
   (e)
   "Any conversational entry, DMs and file transfers included — the lines worth persisting to
 disk (a file line carries only its metadata + saved path, never the bytes)."
-  (member? (get e :kind) [:me :them :action :dm-in :dm-out :file-in :file-out]))
+  (includes? [:me :them :action :dm-in :dm-out :file-in :file-out] (get e :kind)))
 
 (defn- chat-roomed?
   (e)
   "Entries the view hides outside their room: chat lines, `/me` actions, and file transfers.
 DMs, system notes, and closure results show in every room."
-  (member? (get e :kind) [:me :them :action :file-in :file-out]))
+  (includes? [:me :them :action :file-in :file-out] (get e :kind)))
 
 (defn- chat-find-peer
   (m nick)
@@ -462,7 +462,7 @@ deduped like a message; the bytes themselves are never persisted (only the metad
   "Does `name` look like an inline-previewable image, by its extension (case-insensitive)?"
   (let (parts (string/split (string/lower (str name)) ".")
         ext (if (> (count parts) 1) (str "." (last parts)) ""))
-    (member? ext *image-exts*)))
+    (includes? *image-exts* ext)))
 
 (defn- chat-thumb
   (bytes name)
@@ -612,8 +612,8 @@ far behind you are."
 that has joined or left since `(get m :peers)` and set `:peers` to `now`. Factored
 out of `chat-reconcile` so the join/leave diff is unit-testable without live nodes."
   (let (was (get m :peers)
-        joined (remove (fn (n) (member? n was)) now)
-        left (remove (fn (n) (member? n now)) was)
+        joined (remove (fn (n) (includes? was n)) now)
+        left (remove (fn (n) (includes? now n)) was)
         note (fn (mm n verb) (chat-log mm {:kind :system :text (str (chat-node-str n) " " verb)}))
         m1 (fold (fn (mm n) (note mm n "connected")) (assoc m :peers now) joined))
     (fold (fn (mm n) (note mm n "disconnected")) m1 left)))
@@ -677,7 +677,7 @@ each newcomer to replay the conversation so far. Asking every newcomer is self-h
 next. Returns `m` unchanged; the work is the `[:want-history …]` sends."
   (do
     (when (not (get m :backfilled))
-      (doseq (n (remove (fn (x) (member? x was)) now))
+      (doseq (n (remove (fn (x) (includes? was x)) now))
         (chat-to n [:want-history (node-name)])))
     m))
 
@@ -992,7 +992,7 @@ keystroke (a string, `:up`, `[:mouse …]`) has no peer tag, so it's left for th
   (if (and (vector? x) (not (empty? x)))
     (cond
       (= (first x) :peer) (nth x 1)
-      (member? (first x) *peer-tags*) x
+      (includes? *peer-tags* (first x)) x
       else nil)
     nil))
 
@@ -1176,7 +1176,7 @@ aligned; empty when the entry has no timestamp, or `HH:MM` when `now` is unset (
   "Is `e` from the same author + kind as its predecessor `p`, and close in time (<5 min)?
 If so its name chip and stamp can be dropped, grouping a run under one heading."
   (and (= (get p :kind) (get e :kind))
-    (member? (get e :kind) [:me :them :action :dm-in :dm-out])
+    (includes? [:me :them :action :dm-in :dm-out] (get e :kind))
     (= (get p :from) (get e :from))
     (let (a (get p :at) b (get e :at))
       (if (and (number? a) (number? b)) (< (math/abs (- b a)) 300000) true))))
@@ -1462,8 +1462,8 @@ it needs no shape. Mirrors `ui/with-events`."
 scanning all of them; nil if none. Lets `nest run tui`, `nest run --name x --with-tui`, …"
   (cond
     (empty? args) nil
-    (member? (first args) *gui-args*) :gui
-    (member? (first args) *tui-args*) :tui
+    (includes? *gui-args* (first args)) :gui
+    (includes? *tui-args* (first args)) :tui
     else (chat-mode-arg (rest args))))
 
 (defn- chat-name-arg
@@ -1471,7 +1471,7 @@ scanning all of them; nil if none. Lets `nest run tui`, `nest run --name x --wit
   "The first launch arg that isn't a frontend token — the node name / dial identity."
   (cond
     (empty? args) nil
-    (or (member? (first args) *gui-args*) (member? (first args) *tui-args*))
+    (or (includes? *gui-args* (first args)) (includes? *tui-args* (first args)))
       (chat-name-arg (rest args))
     else (first args)))
 
@@ -1483,7 +1483,7 @@ Defaults to the terminal (works everywhere, including over SSH)."
     (do
       (print "open in [g]ui window or [t]erminal? (g/t) ")
       (let (r (read-line))
-        (if (member? r ["g" "G" "gui" "GUI"]) :gui :tui)))))
+        (if (includes? ["g" "G" "gui" "GUI"] r) :gui :tui)))))
 
 (defn- chat-parse-identity
   (input)
@@ -1576,8 +1576,8 @@ registered. Nothing to restore leaves `m` untouched."
                      (let (base (chat-id (or (get e :from) "?") (get e :lc))
                            k (get e :kind))
                        (cond
-                         (member? k [:dm-in :dm-out]) (str "dm|" base)
-                         (member? k [:file-in :file-out]) (str "file|" base)
+                         (includes? [:dm-in :dm-out] k) (str "dm|" base)
+                         (includes? [:file-in :file-out] k) (str "file|" base)
                          else base)))
                 recs)
           m1 (fold chat-see-room

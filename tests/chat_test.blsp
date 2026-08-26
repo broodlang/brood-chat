@@ -471,7 +471,7 @@
               [:chat {:from :bob :text "hi" :lc 1}]))
       (is (get m :dirty))
       ;; a write that just happened → maybe-persist! throttles (stays dirty, no I/O)
-      (is (get (chat/chat-maybe-persist! (assoc m :persisted-at (now))) :dirty)))
+      (is (get (chat/chat-maybe-persist! (assoc m :persisted-at (os/now))) :dirty)))
     ;; no :store → maybe-persist! and flush! are pure no-ops (tests never touch disk)
     (is (map? (chat/chat-maybe-persist! (chat-init "a"))))
     (is (map? (chat/chat-flush! (chat/chat-init "a")))))
@@ -579,7 +579,7 @@
 
   (test "handle-peer routes a raw [:typing …] into the model"
     (let (m (chat/chat-handle-peer (chat-init "ada") [:typing "bob" "#lobby"]))
-      (is (includes? (chat/chat-typing-active m (now)) "bob"))))
+      (is (includes? (chat/chat-typing-active m (os/now)) "bob"))))
 
   (test "peer-msg recognises a raw [:typing …]"
     (assert= (chat/chat-peer-msg [:typing "bob" "#lobby"]) [:typing "bob" "#lobby"]))
@@ -616,7 +616,7 @@
     (is (nil? (chat/chat-file-target (chat-init "a") "bob" "cat.png"))))
 
   (test "receiving a file logs a :file-in metadata line (no bytes) and badges when away"
-    (let (bytes (string->utf8-bytes "PNGDATA")
+    (let (bytes (string/->bytes "PNGDATA")
           away (chat/chat-update (chat-init "a") :blur 80 24)
           m (chat/chat-recv-file away
               {:from :bob
@@ -639,11 +639,11 @@
 
   (test "a file you're looking right at doesn't badge"
     (let (m (chat/chat-recv-file (chat-init "a")
-              {:from :bob :file "x.bin" :bytes (string->utf8-bytes "z") :room "#lobby" :lc 1 :at 1}))
+              {:from :bob :file "x.bin" :bytes (string/->bytes "z") :room "#lobby" :lc 1 :at 1}))
       (assert= (get m :mentions) 0)))
 
   (test "a duplicate file (same sender + Lamport id) is deduped"
-    (let (p {:from :bob :file "x.bin" :bytes (string->utf8-bytes "z") :room "#lobby" :lc 1 :at 1}
+    (let (p {:from :bob :file "x.bin" :bytes (string/->bytes "z") :room "#lobby" :lc 1 :at 1}
           m1 (chat/chat-recv-file (chat-init "a") p)
           n1 (count (filter (fn (e) (= (get e :kind) :file-in)) (get m1 :log)))
           m2 (chat/chat-recv-file m1 p)
@@ -684,7 +684,7 @@
               [:file
                 {:from :bob
                  :file "g.png"
-                 :bytes (string->utf8-bytes "gg")
+                 :bytes (string/->bytes "gg")
                  :room "#lobby"
                  :lc 1
                  :at 1}]
@@ -711,7 +711,7 @@
     (refute (chat/chat-image? "noext")))
 
   (test "image-rows renders a decoded thumb as ▀ half-block cells (fg/bg per cell)"
-    (let (thumb (image-thumb *png-2x2* 32 32)
+    (let (thumb (gui/image-thumb *png-2x2* 32 32)
           rows (chat/chat-image-rows thumb 6 40))
       ; 2px wide → 2 cells; 2px tall → 1 cell row (two pixels per cell)
       (assert= (count rows) 1)
@@ -726,7 +726,7 @@
         (assert= (get (nth op 4) :bg) [10 20 30]))))
 
   (test "image-rows clips to the width budget and no-ops on a nil thumb"
-    (let (thumb (image-thumb *png-2x2* 32 32))
+    (let (thumb (gui/image-thumb *png-2x2* 32 32))
       (assert= (count (first (chat/chat-image-rows thumb 6 1))) 1))
     (assert= (chat/chat-image-rows nil 6 40) []))
 
@@ -738,7 +738,7 @@
     (let (m (chat/chat-recv-file (chat-init "a")
               {:from :bob
                :file "notes.txt"
-               :bytes (string->utf8-bytes "hello")
+               :bytes (string/->bytes "hello")
                :room "#lobby"
                :lc 1
                :at 1}))

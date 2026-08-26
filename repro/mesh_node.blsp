@@ -18,7 +18,7 @@
 
 (defn drain (m deadline)
   "Reconcile + fold peer traffic until `deadline` (epoch-ms), mirroring the real loop."
-  (if (>= (now) deadline)
+  (if (>= (os/now) deadline)
     m
     (drain (receive
              ([:chat p] (chat/chat-handle-peer (chat/chat-reconcile m) [:chat p]))
@@ -35,28 +35,28 @@
   "The conversational (chat/action) lines of the model log."
   (filter (fn (e) (includes? [:me :them :action] (get e :kind))) (get m :log)))
 
-(let (me (getenv "NODE")
-      listen (getenv "LISTEN")
-      dial (getenv "DIAL")
-      say (getenv "SAY")
-      prechat (getenv "PRECHAT"))
-  (if (and listen (not (blank? listen))) (node-start me listen) (node-start me))
+(let (me (os/getenv "NODE")
+      listen (os/getenv "LISTEN")
+      dial (os/getenv "DIAL")
+      say (os/getenv "SAY")
+      prechat (os/getenv "PRECHAT"))
+  (if (and listen (not (blank? listen))) (node/start me listen) (node/start me))
   (register :inbox (self))
   ; readiness marker for the repro runner
-  (println (str "READY " me))
+  (io/puts (str "READY " me))
   (let (m0 (chat/chat-init me)
         m1 (if (and prechat (not (blank? prechat)))
              (fold (fn (mm ln) (chat/chat-submit mm ln)) m0 (string/split prechat "|"))
              m0)
         m2 (if (and dial (not (blank? dial))) (chat/chat-do-connect m1 dial) m1)
         ; converge + backfill
-        m3 (drain m2 (+ (now) 2600))
+        m3 (drain m2 (+ (os/now) 2600))
         ; measure peers here — every node is still alive; staggered exits later would
         ; otherwise drop a late node's peers as earlier nodes finish and leave.
         peers (count (get m3 :peers))
         m4 (if (and say (not (blank? say))) (chat/chat-submit m3 say) m3)
-        m5 (drain m4 (+ (now) 2000)))
+        m5 (drain m4 (+ (os/now) 2000)))
     ; hear everyone's live lines
-    (println (str "RESULT " me " peers=" peers " conv=" (count (conv m5))))
+    (io/puts (str "RESULT " me " peers=" peers " conv=" (count (conv m5))))
     (doseq (e (conv m5))
-      (println (str "  [" (get e :kind) "] " (or (get e :from) "you") ": " (get e :text))))))
+      (io/puts (str "  [" (get e :kind) "] " (or (get e :from) "you") ": " (get e :text))))))

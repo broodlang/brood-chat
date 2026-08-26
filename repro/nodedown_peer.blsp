@@ -8,7 +8,7 @@
 ;;
 ;; Run via repro/run.sh (it sequences this against the survivor).
 
-(node-start "peerb")
-(println "peer: up as " (node-name) " — staying 1500ms, then returning (clean close)")
+(node/start "peerb")
+(io/puts "peer: up as " (node/name) " — staying 1500ms, then returning (clean close)")
 (sleep 1500)
-(println "peer: returning now — socket closes")
+(io/puts "peer: returning now — socket closes")

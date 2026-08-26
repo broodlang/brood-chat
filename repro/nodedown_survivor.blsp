@@ -12,7 +12,7 @@
 ;;
 ;; Run via repro/run.sh.
 
-(node-start "peera")
+(node/start "peera")
 
 ;; B may not have finished listening the instant we start; retry the dial.
 (defn dial-retry (n)
@@ -25,11 +25,11 @@
 
 (let (peer (dial-retry 40))
   (monitor-node peer)
-  (println "survivor: linked to " peer " — waiting up to 4s for [:nodedown]")
+  (io/puts "survivor: linked to " peer " — waiting up to 4s for [:nodedown]")
   (receive
-    ([:nodedown p] (println "PASS: received [:nodedown "
+    ([:nodedown p] (io/puts "PASS: received [:nodedown "
                      p
                      "] from peer's clean exit; (nodes) => "
-                     (nodes)))
+                     (node/list)))
     (after 4000
-      (println "FAIL: no [:nodedown] within 4s of monitoring; (nodes) => " (nodes)))))
+      (io/puts "FAIL: no [:nodedown] within 4s of monitoring; (nodes) => " (node/list)))))

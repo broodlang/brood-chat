@@ -478,7 +478,7 @@ throws on a non-sequence), a non-image name, or a corrupt file all yield nil (no
   (rgba bufw x y)
   "The `[r g b]` of pixel (`x`,`y`) in a row-major RGBA8 buffer `bufw` pixels wide."
   (let (o (* (+ (* y bufw) x) 4))
-    [(byte-at rgba o) (byte-at rgba (+ o 1)) (byte-at rgba (+ o 2))]))
+    [(bytes/at rgba o) (bytes/at rgba (+ o 1)) (bytes/at rgba (+ o 2))]))
 
 (defn- chat-image-row-ops
   (rgba bufw w h cx cy)

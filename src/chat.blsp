@@ -126,11 +126,11 @@ remote `bob@host:port`. Used to compare/display names regardless of qualificatio
   (ms offset-min)
   "Format epoch-milliseconds as a zero-padded `HH:MM`, shifted by `offset-min` minutes
 (the viewer's `/tz` offset from UTC). Pure — the view formats each entry's raw `:at`."
-  (let (mins (+ (quot ms 60000) offset-min)
+  (let (mins (+ (math/quot ms 60000) offset-min)
         ; wrap into [0,1440) even for negatives
-        mins (rem (+ (rem mins 1440) 1440) 1440)
+        mins (math/rem (+ (math/rem mins 1440) 1440) 1440)
         pad (fn (n) (if (< n 10) (str "0" n) (str n))))
-    (str (pad (quot mins 60)) ":" (pad (rem mins 60)))))
+    (str (pad (math/quot mins 60)) ":" (pad (math/rem mins 60)))))
 
 ;; --- attention, ordering & rooms --------------------------------------------
 
@@ -150,7 +150,7 @@ remote `bob@host:port`. Used to compare/display names regardless of qualificatio
   (m lc)
   "Merge a peer's Lamport clock `lc` on receipt: ours jumps past the larger of the two.
 Keeps `:lc` monotonic, so message ids stay unique and every node converges on one order."
-  (assoc m :lc (+ 1 (max (get m :lc 0) (if (number? lc) lc 0)))))
+  (assoc m :lc (+ 1 (math/max (get m :lc 0) (if (number? lc) lc 0)))))
 
 (defn- chat-id
   (from lc)
@@ -222,7 +222,7 @@ pinging when you're staring right at it, while still alerting when you're away o
   ()
   "A short, quiet attention tone for a mention or DM — fire-and-forget, and a graceful
 no-op when the runtime has no audio (or it's muted). Wrapped so it can never throw."
-  (try (audio-beep 880 110 0.14) (catch e nil)))
+  (try (audio/beep 880 110 0.14) (catch e nil)))
 
 (defn- chat-alert
   (m miss?)
@@ -324,8 +324,8 @@ reads as `0 B`."
   (let (b (if (and (number? n) (> n 0)) n 0))
     (cond
       (< b 1024) (str b " B")
-      (< b 1048576) (str (quot b 1024) " KB")
-      else (str (->fixed (/ b 1048576.0) 1) " MB"))))
+      (< b 1048576) (str (math/quot b 1024) " KB")
+      else (str (math/->fixed (/ b 1048576.0) 1) " MB"))))
 
 (defn- chat-safe-basename
   (name)
@@ -340,7 +340,7 @@ name can't escape the incoming dir (`../../etc/passwd` → `passwd`). A degenera
   (path)
   "The directory part of `path` — everything before the last `/` (\"\" when there is none)."
   (let (parts (string/split (str path) "/"))
-    (string/join "/" (take (max 0 (- (count parts) 1)) parts))))
+    (string/join "/" (take (math/max 0 (- (count parts) 1)) parts))))
 
 (defn- chat-file-target
   (m from name)
@@ -502,8 +502,8 @@ a nil thumb or no room — so a non-image file simply shows its metadata line."
     (let (bufw (get thumb :width)
           h (get thumb :height)
           rgba (get thumb :rgba)
-          w (min bufw maxw)
-          rows (quot (+ h 1) 2))
+          w (math/min bufw maxw)
+          rows (math/quot (+ h 1) 2))
       (map (fn (cy) (chat-image-row-ops rgba bufw w h cx cy)) (range rows)))))
 
 (defn- chat-strip-thumb
@@ -536,7 +536,7 @@ RGBA is transient (re-derivable from the saved file), never written to the on-di
 or compile error in `src` is caught and reported locally, so a malformed `/run` never
 crashes the app or ships a broken closure. Returns the updated model."
   (try
-    (let (f (eval `(fn () ~(read-string src))))
+    (let (f (eval `(fn () ~(reflect/read-string src))))
       (chat-broadcast [:call (node/name) src f])
       (chat-log m {:kind :system :text (str "shipped closure: " src)}))
     (catch e (chat-log m {:kind :system :text (str "bad /run: " (chat-err e))}))))
@@ -775,9 +775,9 @@ fields rather than failing to match."
 backoff up to `n` times, then tell the inbox it gave up. Runs in its own process so a
 slow or absent peer never blocks the UI; success is surfaced by the tick reconcile."
   (cond
-    (<= n 0) (send (whereis :inbox) [:dial-failed name])
+    (<= n 0) (send (proc/whereis :inbox) [:dial-failed name])
     else (try
-           (connect name)
+           (node/connect name)
            (catch e (do (sleep 200) (chat-dial-retry name (- n 1)))))))
 
 (defn- chat-spawn-dialer
@@ -791,7 +791,7 @@ blocks the UI, reporting `[:dial-failed]` if it finally gives up."
   (if (includes? name ":")
     (reconnect/watch name)
     (try
-      (connect name)
+      (node/connect name)
       (catch e (spawn (fn () (chat-dial-retry name *dial-attempts*)))))))
 
 (defn- chat-do-connect
@@ -892,7 +892,7 @@ so the new room starts fresh; the room is registered so `/rooms` lists it."
 nil if it isn't a plain integer."
   (let (t (string/trim s)
         body (if (string/starts-with? t "+") (string/substring t 1) t)
-        h (try (read-string body) (catch e nil)))
+        h (try (reflect/read-string body) (catch e nil)))
     (if (int? h) (* h 60) nil)))
 
 (defn- chat-submit
@@ -942,7 +942,7 @@ rest), so no input can break the session."
             {:kind :system
              :text (str "timezone set to UTC"
                      (if (>= off 0) "+" "")
-                     (quot off 60))})))
+                     (math/quot off 60))})))
     (string/starts-with? line "/run ") (chat-run-expr m (chat-rest-after line))
     (string/starts-with? line "/send ") (chat-send-file m (string/trim (chat-rest-after line)))
     else (chat-send-say m line false)))
@@ -1018,14 +1018,14 @@ run the line and reset the editor (remembering it in history); `:cancel` (C-c) a
   "Move the scrollback viewport by `by` visual rows (positive = toward older). Floors at
 the live bottom; the view clamps the top, so an over-scroll is harmless. Landing back at
 the bottom means you've caught up, so alerts (unread + mention badge) clear."
-  (let (s (max 0 (+ (get m :scroll) by)))
+  (let (s (math/max 0 (+ (get m :scroll) by)))
     (if (= s 0) (chat-clear-alerts (assoc m :scroll 0)) (assoc m :scroll s))))
 
 (defn- chat-scroll-input
   (input rows)
   "Map a scroll gesture to a signed row delta (positive = older), or nil if `input`
 isn't one. PgUp/PgDn page by the log height; the mouse wheel nudges a few rows."
-  (let (page (max 1 (- rows 4)))
+  (let (page (math/max 1 (- rows 4)))
     (cond
       (= input :page-up) page
       (= input :page-down) (- page)
@@ -1081,7 +1081,7 @@ model is kept. On quit, any pending write is flushed."
 (defn- chat-take-cells-go
   (s width i)
   (if (or (>= i (string/length s))
-        (> (display-width (string/substring s 0 (+ i 1))) width))
+        (> (string/display-width (string/substring s 0 (+ i 1))) width))
     [(string/substring s 0 i) (string/substring s i)]
     (chat-take-cells-go s width (+ i 1))))
 
@@ -1089,14 +1089,14 @@ model is kept. On quit, any pending write is flushed."
   (s width)
   "Truncate `s` to `width` display cells, marking the cut with an ellipsis."
   (cond
-    (<= (display-width s) width) s
+    (<= (string/display-width s) width) s
     (< width 1) ""
     else (str (first (chat-take-cells s (- width 1))) "…")))
 
 (defn- chat-center
   (s cols)
   "The left column that centres `s` within `cols` (by display width)."
-  (max 0 (quot (- cols (display-width s)) 2)))
+  (math/max 0 (math/quot (- cols (string/display-width s)) 2)))
 
 (defn- chat-peer-color
   (name-in)
@@ -1105,7 +1105,7 @@ model is kept. On quit, any pending write is flushed."
     (if (string/blank? name)
       :green (let (i (index-of "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
                 (string/substring name 0 1)))
-        (nth *peer-colors* (rem (if (< i 0) 0 i) (count *peer-colors*)))))))
+        (nth *peer-colors* (math/rem (if (< i 0) 0 i) (count *peer-colors*)))))))
 
 ;; word-wrapping (display-cell aware) ----------------------------------------
 
@@ -1116,7 +1116,7 @@ model is kept. On quit, any pending write is flushed."
 
 (defn- chat-chunks-acc
   (s width acc)
-  (if (<= (display-width s) width)
+  (if (<= (string/display-width s) width)
     (into [] (append acc [s]))
     (let (pre (first (chat-take-cells s width))
           pre (if (= pre "") (string/substring s 0 1) pre)
@@ -1138,11 +1138,11 @@ splitting an over-long word. Returns at least one line (`\"\"` for empty text)."
     [text]
     (let (lines (fold (fn (acc word)
                         (let (cur (if (empty? acc) "" (last acc))
-                              head (take (max 0 (- (count acc) 1)) acc)
+                              head (take (math/max 0 (- (count acc) 1)) acc)
                               joined (if (= cur "") word (str cur " " word)))
                           (cond
-                            (<= (display-width joined) width) (append head [joined])
-                            (<= (display-width word) width) (append acc [word])
+                            (<= (string/display-width joined) width) (append head [joined])
+                            (<= (string/display-width word) width) (append acc [word])
                             else (append acc (chat-chunks word width)))))
                   []
                   (chat-words text)))
@@ -1166,8 +1166,8 @@ aligned; empty when the entry has no timestamp, or `HH:MM` when `now` is unset (
       (cond
         (or (<= os/now 0) (< d 0)) (string/pad-left (chat-hhmm at tz) 5)
         (< d 60000) "  now"
-        (< d 3600000) (string/pad-left (str (quot d 60000) "m") 5)
-        (< d 86400000) (string/pad-left (str (quot d 3600000) "h") 5)
+        (< d 3600000) (string/pad-left (str (math/quot d 60000) "m") 5)
+        (< d 86400000) (string/pad-left (str (math/quot d 3600000) "h") 5)
         else (string/pad-left (chat-hhmm at tz) 5)))))
 
 (defn- chat-same-author?
@@ -1193,9 +1193,9 @@ If so its name chip and stamp can be dropped, grouping a run under one heading."
   "Visual lines for a left-aligned entry: `chip` (in `chipface`) on line 0 at `cx`, then
 `body` word-wrapped and hanging-indented under itself in `bodyface`; the timestamp ops
 `tsop` sit on line 0 only."
-  (let (chipw (display-width chip)
+  (let (chipw (string/display-width chip)
         bx (+ cx chipw)
-        lines (chat-wrap body (max 1 (- cols bx)))
+        lines (chat-wrap body (math/max 1 (- cols bx)))
         mk (fn (i)
              (let (ln (nth lines i)
                    lead (if (= i 0) (append tsop [(text 0 cx chip chipface)]) [])
@@ -1208,11 +1208,11 @@ If so its name chip and stamp can be dropped, grouping a run under one heading."
   "Visual lines for your own (right-aligned) message; `◂ you` tags the last line unless it's
 a grouped continuation of your previous line."
   (let (tag (if grouped? "" "  ◂ you")
-        lines (chat-wrap txt (max 1 (- cols cx 8)))
+        lines (chat-wrap txt (math/max 1 (- cols cx 8)))
         n (count lines)
         mk (fn (i)
              (let (s (if (= i (- n 1)) (str (nth lines i) tag) (nth lines i))
-                   x (max cx (- cols (display-width s) 1)))
+                   x (math/max cx (- cols (string/display-width s) 1)))
                (append (if (= i 0) tsop []) [(text 0 x s {:fg :cyan :bold true})]))))
     (map mk (range n))))
 
@@ -1235,7 +1235,7 @@ stamp and chip are blanked so a run reads as one block."
                (chat-vlines-left cols
                  cx
                  tsop
-                 (if grouped? (chat-blank (display-width chip)) chip)
+                 (if grouped? (chat-blank (string/display-width chip)) chip)
                  chipface
                  body
                  bodyface)))
@@ -1319,7 +1319,7 @@ with a `•N` unread dot)."
   (m panel-x sw rows)
   "Lay the sidebar lines down the right panel (rows 1 .. `rows`-3), each clamped to `sw`."
   (let (lines (chat-sidebar-lines m)
-        h (max 0 (- rows 3))
+        h (math/max 0 (- rows 3))
         vis (take h lines)
         mk (fn (i)
              (let (ln (nth vis i))
@@ -1362,19 +1362,19 @@ can never render out of bounds."
         lw (if (> sw 0) (- cols sw 1) cols)
         panel-x (- cols sw)
         ; log region: rows 1 .. rows-3
-        h (max 0 (- rows 3))
+        h (math/max 0 (- rows 3))
         shown (into [] (filter (fn (e) (chat-visible? e room)) (get m :log)))
         flags (into [] (chat-group-flags shown))
         vlines (mapcat (fn (i) (chat-entry-vlines (nth shown i) lw tz me nowt (nth flags i)))
                  (range (count shown)))
         total (count vlines)
         ; clamp scroll to range
-        s (min (max 0 (get m :scroll)) (max 0 (- total h)))
+        s (math/min (math/max 0 (get m :scroll)) (math/max 0 (- total h)))
         end (- total s)
-        start (max 0 (- end h))
+        start (math/max 0 (- end h))
         window (take (- end start) (drop start vlines))
         ; bottom-align a short log
-        base (+ 1 (max 0 (- h (count window))))
+        base (+ 1 (math/max 0 (- h (count window))))
         log-ops (chat-place-vlines window base)
         side-ops (if (> sw 0) (chat-sidebar-ops m panel-x sw rows) [])
         sep-ops (if (> sw 0)
@@ -1427,7 +1427,8 @@ can never render out of bounds."
             0
             (chat-clamp prompt cols)
             {:bold true})
-          (cursor (- rows 1) (min (- cols 1) (+ (display-width ptxt) (get edit :point))))]))))
+          (cursor (- rows 1)
+            (math/min (- cols 1) (+ (string/display-width ptxt) (get edit :point))))]))))
 
 ;; --- the peer-traffic frontend wrapper --------------------------------------
 
@@ -1506,7 +1507,7 @@ with. Anything without an `@host:port` stays local."
   ()
   "The directory this node's history lives in: `$XDG_DATA_HOME` (or `~/.local/share`)
 `/broodchat`."
-  (str (or (os/getenv "XDG_DATA_HOME") (str (os/getenv "HOME") "/.local/share")) "/broodchat"))
+  (str (or (os/env "XDG_DATA_HOME") (str (os/env "HOME") "/.local/share")) "/broodchat"))
 
 (defn- chat-store-path
   (node)
@@ -1556,7 +1557,7 @@ couple of seconds of messages aren't lost. A no-op when the log isn't dirty."
 (untrusted-on-disk, so a bad file degrades to a fresh start rather than a crash)."
   (try
     (if (file/exists? path)
-      (let (data (read-string (file/slurp path)))
+      (let (data (reflect/read-string (file/slurp path)))
         (if (or (list? data) (vector? data)) (into [] (filter map? data)) []))
       [])
     (catch e [])))
@@ -1570,7 +1571,7 @@ registered. Nothing to restore leaves `m` untouched."
   (if (empty? entries)
     m
     (let (recs (into [] entries)
-          maxlc (fold (fn (a e) (max a (if (number? (get e :lc)) (get e :lc) 0))) 0 recs)
+          maxlc (fold (fn (a e) (math/max a (if (number? (get e :lc)) (get e :lc) 0))) 0 recs)
           ids (map (fn (e)
                      (let (base (chat-id (or (get e :from) "?") (get e :lc))
                            k (get e :kind))
@@ -1584,7 +1585,7 @@ registered. Nothing to restore leaves `m` untouched."
                (map (fn (e) (or (get e :room) *default-room*)) (filter chat-roomed? recs)))
           log (get m1 :log))
       (assoc m1
-        :lc (max (get m1 :lc 0) maxlc)
+        :lc (math/max (get m1 :lc 0) maxlc)
         :seen (seq/take-last *log-cap* ids)
         :log
           (seq/take-last *log-cap*
@@ -1599,7 +1600,7 @@ registered. Nothing to restore leaves `m` untouched."
 dial address for a TCP node (shown in the header + announced), or nil for a local node.
 Wires up persistence: the node's saved conversation is loaded and its `:store` path set, so
 lines survive a restart."
-  (register :inbox (self))
+  (proc/register :inbox (self))
   (let (store (chat-store-path (node/name))
         loaded (do (try (file/mkdir (chat-store-dir)) (catch e nil)) (chat-load-entries store))
         ;; :persisted-at now so the just-loaded data isn't rewritten on the first tick

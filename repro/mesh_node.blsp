@@ -35,13 +35,13 @@
   "The conversational (chat/action) lines of the model log."
   (filter (fn (e) (includes? [:me :them :action] (get e :kind))) (get m :log)))
 
-(let (me (os/getenv "NODE")
-      listen (os/getenv "LISTEN")
-      dial (os/getenv "DIAL")
-      say (os/getenv "SAY")
-      prechat (os/getenv "PRECHAT"))
+(let (me (os/env "NODE")
+      listen (os/env "LISTEN")
+      dial (os/env "DIAL")
+      say (os/env "SAY")
+      prechat (os/env "PRECHAT"))
   (if (and listen (not (blank? listen))) (node/start me listen) (node/start me))
-  (register :inbox (self))
+  (proc/register :inbox (self))
   ; readiness marker for the repro runner
   (io/puts (str "READY " me))
   (let (m0 (chat/chat-init me)

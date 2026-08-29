@@ -97,9 +97,9 @@ work identically in the window and the terminal (it silently didn't, in the wind
 
 (defn- chat-node-str
   (n)
-  "A node name for display: `(name …)` drops the leading colon a node *keyword*
+  "A node name for display: `(->string …)` drops the leading colon a node *keyword*
 stringifies with (`:alice@host` → `\"alice@host\"`); a string passes through."
-  (name n))
+  (->string n))
 
 (defn- chat-short
   (n)
@@ -536,7 +536,7 @@ RGBA is transient (re-derivable from the saved file), never written to the on-di
 or compile error in `src` is caught and reported locally, so a malformed `/run` never
 crashes the app or ships a broken closure. Returns the updated model."
   (try
-    (let (f (eval `(fn () ~(reflect/read-string src))))
+    (let (f (reflect/eval `(fn () ~(reflect/read-string src))))
       (chat-broadcast [:call (node/name) src f])
       (chat-log m {:kind :system :text (str "shipped closure: " src)}))
     (catch e (chat-log m {:kind :system :text (str "bad /run: " (chat-err e))}))))

@@ -29,7 +29,7 @@
 
 (defn feed (m keys)
   "Fold a list of key inputs through `chat-update`."
-  (fold (fn (m k) (chat-update m k 80 24)) m keys))
+  (fold keys m (fn (m k) (chat-update m k 80 24))))
 
 (defn type-line (m s)
   "Type string `s` into the model one character at a time."
@@ -246,10 +246,10 @@
       (is (get m1 :backfilled))
       (assert= (get (first (get m1 :log)) :text)
         "welcome, alice — /join a room · /connect a peer · @nick to ping · /help")
-      (refute (empty? (filter (fn (e) (= (get e :text) "earlier")) (get m1 :log))))
+      (refute (empty? (filter (get m1 :log) (fn (e) (= (get e :text) "earlier")))))
       ;; a second dump (e.g. from another peer we asked) is ignored
       (let (m2 (chat/chat-handle-peer m1 [:history [{:from "z" :text "again" :lc 9 :at 1}]]))
-        (is (empty? (filter (fn (e) (= (get e :text) "again")) (get m2 :log)))))))
+        (is (empty? (filter (get m2 :log) (fn (e) (= (get e :text) "again"))))))))
 
   (test "a want-history request leaves our own model unchanged"
     (let (m0 (chat-init "alice")
@@ -287,7 +287,7 @@
   (test "a malformed history dump is tolerated and still marks backfilled"
     (let (m (chat/chat-handle-peer (chat-init "a") [:history "garbage"]))
       (is (get m :backfilled))
-      (is (empty? (filter (fn (e) (= (get e :kind) :them)) (get m :log))))))
+      (is (empty? (filter (get m :log) (fn (e) (= (get e :kind) :them)))))))
 
   (test "a failed background dial reports which peer it couldn't reach"
     (let (m (chat/chat-handle-peer (chat-init "a") [:dial-failed :bob@host]))
@@ -452,16 +452,16 @@
                  :lc 1
                  :room "#lobby"}
                 {:from "bob" :text "dup" :lc 2 :room "#lobby"}])
-          texts (into [] (map (fn (e) (get e :text)) (filter chat/chat-public? (get m :log)))))
+          texts (into [] (map (filter (get m :log) chat/chat-public?) (fn (e) (get e :text)))))
       ; "dup" (id bob|2) skipped; the rest sorted 1,5
       (assert= texts ["early" "later"])))
 
   (test "a live line then its history echo collapse to one (id dedupe)"
     (let (live (chat/chat-handle-peer (chat-init "a") [:chat {:from :bob :text "hi" :lc 7}])
-          n (count (filter (fn (e) (= (get e :kind) :them)) (get live :log)))
+          n (count (filter (get live :log) (fn (e) (= (get e :kind) :them))))
           echo (chat/chat-handle-peer live
                  [:history [{:from "bob" :text "hi" :lc 7 :room "#lobby"}]])
-          n2 (count (filter (fn (e) (= (get e :kind) :them)) (get echo :log))))
+          n2 (count (filter (get echo :log) (fn (e) (= (get e :kind) :them)))))
       (assert= n 1)
       (assert= n2 1)))
 
@@ -487,9 +487,9 @@
           m (chat/chat-restore (chat-init "a") saved))
       (assert= (get m :lc) 6)
       ; the two lines are present with their original kinds
-      (refute (empty? (filter (fn (e) (and (= (get e :kind) :me) (= (get e :text) "mine")))
-                        (get m :log))))
-      (refute (empty? (filter (fn (e) (= (get e :kind) :them)) (get m :log))))))
+      (refute (empty? (filter (get m :log)
+                        (fn (e) (and (= (get e :kind) :me) (= (get e :text) "mine"))))))
+      (refute (empty? (filter (get m :log) (fn (e) (= (get e :kind) :them)))))))
 
   (test "load-entries returns [] for a missing or corrupt file"
     (assert= (chat/chat-load-entries "/tmp/broodchat-does-not-exist-xyz.log") [])))
@@ -539,7 +539,7 @@
               :room "#dev"
               :rooms ["#lobby" "#dev"]
               :room-unread {"#lobby" 3})
-          lines (map (fn (l) (get l :text)) (chat/chat-sidebar-lines m)))
+          lines (map (chat/chat-sidebar-lines m) (fn (l) (get l :text))))
       (is (includes? lines "● ada  (you)"))
       (is (includes? lines "● bob"))
       ; current room marked
@@ -645,9 +645,9 @@
   (test "a duplicate file (same sender + Lamport id) is deduped"
     (let (p {:from :bob :file "x.bin" :bytes (string/->bytes "z") :room "#lobby" :lc 1 :at 1}
           m1 (chat/chat-recv-file (chat-init "a") p)
-          n1 (count (filter (fn (e) (= (get e :kind) :file-in)) (get m1 :log)))
+          n1 (count (filter (get m1 :log) (fn (e) (= (get e :kind) :file-in))))
           m2 (chat/chat-recv-file m1 p)
-          n2 (count (filter (fn (e) (= (get e :kind) :file-in)) (get m2 :log))))
+          n2 (count (filter (get m2 :log) (fn (e) (= (get e :kind) :file-in)))))
       (assert= n1 1)
       (assert= n2 1)))
 

@@ -33,7 +33,7 @@
 
 (defn conv (m)
   "The conversational (chat/action) lines of the model log."
-  (filter (fn (e) (includes? [:me :them :action] (get e :kind))) (get m :log)))
+  (filter (get m :log) (fn (e) (includes? [:me :them :action] (get e :kind)))))
 
 (let (me (os/env "NODE")
       listen (os/env "LISTEN")
@@ -46,7 +46,7 @@
   (io/puts (str "READY " me))
   (let (m0 (chat/chat-init me)
         m1 (if (and prechat (not (blank? prechat)))
-             (fold (fn (mm ln) (chat/chat-submit mm ln)) m0 (string/split prechat "|"))
+             (fold (string/split prechat "|") m0 (fn (mm ln) (chat/chat-submit mm ln)))
              m0)
         m2 (if (and dial (not (blank? dial))) (chat/chat-do-connect m1 dial) m1)
         ; converge + backfill

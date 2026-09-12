@@ -33,7 +33,7 @@
 
 (defn conv (m)
   "The conversational (chat/action) lines of the model log."
-  (filter (get m :log) (fn (e) (includes? [:me :them :action] (get e :kind)))))
+  (seq/filter (get m :log) (fn (e) (includes? [:me :them :action] (get e :kind)))))
 
 (let (me (os/env "NODE")
       listen (os/env "LISTEN")

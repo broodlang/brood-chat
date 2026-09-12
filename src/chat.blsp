@@ -238,7 +238,7 @@ DMs, system notes, and closure results show in every room."
   "The connected peer node whose bare short name matches `nick` (case-insensitive), or
 nil — used to address a `/msg` at one node rather than broadcasting."
   (let (want (string/lower (chat-short nick)))
-    (first (filter (get m :peers) (fn (p) (= (string/lower (chat-short p)) want))))))
+    (first (seq/filter (get m :peers) (fn (p) (= (string/lower (chat-short p)) want))))))
 
 ;; --- typing indicators (ephemeral presence) ---------------------------------
 
@@ -275,7 +275,7 @@ Pure — the clock is passed in."
 `*typing-ttl-ms*` of `now`, in this room, and not you. Sorted for a stable footer."
   (let (room (get m :room)
         me (get m :name)
-        fresh (filter (get m :typing {})
+        fresh (seq/filter (get m :typing {})
                 (fn ([nm info])
                   (and (not (= nm me))
                     (= (get info :room) room)
@@ -556,8 +556,8 @@ far behind you are."
 that has joined or left since `(get m :peers)` and set `:peers` to `now`. Factored
 out of `chat-reconcile` so the join/leave diff is unit-testable without live nodes."
   (let (was (get m :peers)
-        joined (seq/remove now (fn (n) (includes? was n)))
-        left (seq/remove was (fn (n) (includes? now n)))
+        joined (seq/reject now (fn (n) (includes? was n)))
+        left (seq/reject was (fn (n) (includes? now n)))
         note (fn (mm n verb) (chat-log mm {:kind :system :text (str (chat-node-str n) " " verb)}))
         m1 (fold joined (assoc m :peers now) (fn (mm n) (note mm n "connected"))))
     (fold left m1 (fn (mm n) (note mm n "disconnected")))))
@@ -590,8 +590,8 @@ the rest are ordered by that clock so the reconstructed history matches everyone
 Tolerant of a malformed dump — a non-list, or non-map records, degrade to nothing rather
 than crashing, since a peer's reply is untrusted input."
   (let (safe (if (or (list? entries) (vector? entries)) entries [])
-        recs (filter safe map?)
-        fresh (filter recs
+        recs (seq/filter safe map?)
+        fresh (seq/filter recs
                 (fn (r) (not (chat-seen? m (chat-id (or (get r :from) "?") (get r :lc))))))
         sorted (sort-by fresh (fn (r) (if (number? (get r :lc)) (get r :lc) 0)))
         row (fn (r)
@@ -618,7 +618,7 @@ each newcomer to replay the conversation so far. Asking every newcomer is self-h
 next. Returns `m` unchanged; the work is the `[:want-history …]` sends."
   (do
     (when (not (get m :backfilled))
-      (doseq (n (seq/remove now (fn (x) (includes? was x))))
+      (doseq (n (seq/reject now (fn (x) (includes? was x))))
         (chat-to n [:want-history (node/name)])))
     m))
 
@@ -703,7 +703,7 @@ fields rather than failing to match."
 (defn- chat-peer-known? (m name)
   "Is `name` already a connected peer (matched on its bare short name)?"
   (let (want (chat-short name))
-    (not (empty? (filter (get m :peers) (fn (p) (= (chat-short p) want)))))))
+    (not (empty? (seq/filter (get m :peers) (fn (p) (= (chat-short p) want)))))))
 
 (defn- chat-dial-retry (name n)
   "Background connect loop: try `(connect name)`, retrying on failure with a 200 ms
@@ -882,7 +882,7 @@ rest), so no input can break the session."
 shared prefix fills as far as it can and lists the candidates in the log."
   (let (edit (get m :edit)
         buf (get edit :text)
-        ms (filter *commands* (fn (c) (string/starts-with? c buf))))
+        ms (seq/filter *commands* (fn (c) (string/starts-with? c buf))))
     (cond
       (empty? ms) m
       (= (count ms) 1) (assoc m :edit (chat-set-text edit (first ms)))
@@ -1022,7 +1022,7 @@ model is kept. On quit, any pending write is flushed."
 
 (defn- chat-words (text)
   "Split `text` on spaces, dropping empties (runs of spaces collapse)."
-  (filter (string/split text " ") (fn (w) (not (= w "")))))
+  (seq/filter (string/split text " ") (fn (w) (not (= w "")))))
 
 (defn- chat-chunks-acc (s width acc)
   (if (<= (string/display-width s) width)
@@ -1258,7 +1258,7 @@ can never render out of bounds."
         panel-x (- cols sw)
         ; log region: rows 1 .. rows-3
         h (math/max 0 (- rows 3))
-        shown (into [] (filter (get m :log) (fn (e) (chat-visible? e room))))
+        shown (into [] (seq/filter (get m :log) (fn (e) (chat-visible? e room))))
         flags (into [] (chat-group-flags shown))
         vlines (mapcat (range (count shown))
                  (fn (i) (chat-entry-vlines (nth shown i) lw tz me nowt (nth flags i))))
@@ -1416,7 +1416,7 @@ accounted for (`:dirty` cleared, `:persisted-at` stamped)."
         (check-allow :discarded-catch
           (try
             (file/spit path
-              (pr-str (into [] (map (filter (get m :log) chat-convo?) chat-strip-thumb))))
+              (pr-str (into [] (map (seq/filter (get m :log) chat-convo?) chat-strip-thumb))))
             (catch e nil)))
         (assoc m :dirty false :persisted-at (os/now))))))
 
@@ -1443,7 +1443,7 @@ couple of seconds of messages aren't lost. A no-op when the log isn't dirty."
     (try
       (if (file/exists? path)
         (let (data (reflect/read-string (file/slurp path)))
-          (if (or (list? data) (vector? data)) (into [] (filter data map?)) []))
+          (if (or (list? data) (vector? data)) (into [] (seq/filter data map?)) []))
         [])
       (catch e []))))
 
@@ -1464,7 +1464,7 @@ registered. Nothing to restore leaves `m` untouched."
                       (includes? [:dm-in :dm-out] k) (str "dm|" base)
                       (includes? [:file-in :file-out] k) (str "file|" base)
                       else base))))
-          m1 (fold (map (filter recs chat-roomed?) (fn (e) (or (get e :room) *default-room*)))
+          m1 (fold (map (seq/filter recs chat-roomed?) (fn (e) (or (get e :room) *default-room*)))
                m chat-see-room)
           log (get m1 :log))
       (assoc m1

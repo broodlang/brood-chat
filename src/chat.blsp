@@ -493,7 +493,7 @@ crashes the app or ships a broken closure. Returns the updated model."
 (defn- chat-fresh-edit (history)
   "A fresh lineedit state for the input line, seeded with the newest-first message
 `history` (↑/↓ and C-r recall earlier sends)."
-  (editor/lineedit/lineedit-init "› " "" history))
+  (editor/lineedit/lineedit-init "› " history))
 
 (defn chat-init (name)
   "The starting model. `:name` is the display name shown on your messages (`/nick`

@@ -20,7 +20,7 @@
     (node/connect "peerb")
     (catch e
       (if (> n 0)
-        (do (sleep 100) (dial-retry (- n 1)))
+        (do (proc/sleep 100) (dial-retry (- n 1)))
         (throw e)))))
 
 (let (peer (dial-retry 40))

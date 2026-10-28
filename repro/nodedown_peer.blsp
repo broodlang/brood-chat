@@ -10,5 +10,5 @@
 
 (node/start "peerb")
 (io/puts "peer: up as " (node/name) " — staying 1500ms, then returning (clean close)")
-(sleep 1500)
+(proc/sleep 1500)
 (io/puts "peer: returning now — socket closes")

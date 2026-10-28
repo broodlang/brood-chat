@@ -24,7 +24,7 @@ It's a demo of three Brood capabilities at once:
 - **One UI, two frontends** (`std/ui`, ADR-046) — a pure `chat-view` (model + size →
   a render frame) and a `chat-update` (model + input → model) in the TEA style. The
   only difference between the window and the terminal is the frontend handed to
-  `ui-run`: `(gui-display)` vs `*term-display*`. The same frame paints to both, and
+  `ui-run`: `(gui-display)` vs `editor/ui/*term-display*`. The same frame paints to both, and
   a crash in `view`/`update` is survived (the loop rolls back to the last good frame)
   rather than killing the session.
 

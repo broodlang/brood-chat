@@ -11,7 +11,7 @@ For the resolved items, see this file's git history and the upstream
 
 | # | Finding | Resolution |
 |---|---------|------------|
-| §1.1 | `nest run --main` silently ignored | `*project-main-override*` slot preferred over the manifest; `run_main.rs` test |
+| §1.1 | `nest run --main` silently ignored | `project/*main-override*` slot preferred over the manifest; `run_main.rs` test |
 | §1.2 | clean disconnect not detected | `drop_link`-on-EOF fires `[:nodedown]` before the heartbeat window; repro at [`repro/run.sh`](../repro/run.sh) |
 | §1.3 | misleading scheduler-race hint on a cross-node unbound | hint gated to bare names (`!name.contains('/')`) |
 | §2.1 | "functions can't be sent" (false) | `brood-for-claude.md` now documents sendable closures + late-bound free globals |

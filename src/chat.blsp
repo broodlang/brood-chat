@@ -41,7 +41,7 @@ globals late-bind on the far side. Results come back and land in the log.
 It's built on `std/ui` (the TEA-style `ui-run` loop, ADR-046): a pure `chat-view`
 (model + size → a `display` render frame) and a `chat-update` (model + input →
 model). The ONLY difference between the window and the terminal is the frontend we
-hand `ui-run`: `(gui-display)` vs `*term-display*`. The same frame paints to both.
+hand `ui-run`: `(gui-display)` vs `editor/ui/*term-display*`. The same frame paints to both.
 
 Peer traffic and keystrokes share one mailbox in GUI mode (`gui-open` delivers input
 there too), so we wrap the frontend's `:poll` with a *selective* receive
@@ -181,7 +181,7 @@ batched (`chat-maybe-persist!`), so a burst of messages costs one write, not one
 cleared for the room you're currently in — you're reading it."
   (if (= room (get m :room))
     m
-    (update-in m [:room-unread room] (fn (n) (+ 1 (if n n 0))))))
+    (map/update-in m [:room-unread room] (fn (n) (+ 1 (if n n 0))))))
 
 (defn- chat-present? (m room dm?)
   "Would a message for `room` (or a DM, when `dm?`) already be on your screen — the window
@@ -593,7 +593,7 @@ than crashing, since a peer's reply is untrusted input."
         recs (seq/filter safe map?)
         fresh (seq/filter recs
                 (fn (r) (not (chat-seen? m (chat-id (or (get r :from) "?") (get r :lc))))))
-        sorted (sort-by fresh (fn (r) (if (number? (get r :lc)) (get r :lc) 0)))
+        sorted (seq/sort-by fresh (fn (r) (if (number? (get r :lc)) (get r :lc) 0)))
         row (fn (r)
               {:kind (if (get r :act) :action :them)
                :from (or (get r :from) "?")
@@ -714,7 +714,7 @@ slow or absent peer never blocks the UI; success is surfaced by the tick reconci
     else
       (try
         (node/connect name)
-        (catch e (do (sleep 200) (chat-dial-retry name (- n 1)))))))
+        (catch e (do (proc/sleep 200) (chat-dial-retry name (- n 1)))))))
 
 (defn- chat-spawn-dialer (name)
   "Dial `name`. A remote `name@host:port` goes to `reconnect/watch` (supervised,
@@ -1373,7 +1373,7 @@ Defaults to the terminal (works everywhere, including over SSH)."
   (or (chat-mode-arg args)
     (do
       (io/write "open in [g]ui window or [t]erminal? (g/t) ")
-      (let (r (read-line))
+      (let (r (io/read-line))
         (if (includes? ["g" "G" "gui" "GUI"] r) :gui :tui)))))
 
 (defn- chat-parse-identity (input)
@@ -1388,7 +1388,7 @@ with. Anything without an `@host:port` stays local."
 
 (defn- chat-arg-or-ask (val prompt)
   "Use startup arg `val` when it's a non-blank string, else prompt for it on the terminal."
-  (if (and (string? val) (not (string/blank? val))) val (do (io/write prompt) (read-line))))
+  (if (and (string? val) (not (string/blank? val))) val (do (io/write prompt) (io/read-line))))
 
 ;; --- persistence: keep the conversation across restarts ---------------------
 
@@ -1497,7 +1497,7 @@ lines survive a restart."
              (chat-log (assoc m0 :dial dial)
                {:kind :system :text (str "listening — remote peers: /connect " dial)})
              m0)
-        display (chat-with-peers (if (= mode :gui) (gui-display) *term-display*)))
+        display (chat-with-peers (if (= mode :gui) (gui-display) editor/ui/*term-display*)))
     (ui-run m1 chat-view chat-update display)))
 
 (defn main (& args)

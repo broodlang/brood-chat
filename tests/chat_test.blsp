@@ -323,8 +323,8 @@
 
 (describe "chat: help & clear"
   (test "/help logs the command summary"
-    (let (m (chat/chat-submit (chat-init "a") "/help"))
-      (is (string/starts-with? (get (last-entry m) :text) "commands:"))))
+    (let ({:text text} (last-entry (chat/chat-submit (chat-init "a") "/help")))
+      (is (string/starts-with? text "commands:"))))
 
   (test "/clear wipes the log and returns to live"
     (let (m (chat/chat-submit (assoc (chat-init "a") :scroll 4) "/clear"))

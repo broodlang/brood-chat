@@ -287,7 +287,7 @@ Pure — the clock is passed in."
 (defn- chat-human-size (n)
   "A short human byte count for the log: `840 B`, `24 KB`, `3.5 MB`. A nil/negative `n`
 reads as `0 B`."
-  (let (b (if (and (number? n) (> n 0)) n 0))
+  (let (b (if (and (int? n) (> n 0)) n 0))
     (cond
       (< b 1024) (str b " B")
       (< b 1048576) (str (math/quot b 1024) " KB")
@@ -442,7 +442,7 @@ throws on a non-sequence), a non-image name, or a corrupt file all yield nil (no
             bot (if (< by h) (chat-px rgba bufw x by) top))
         (text 0 (+ cx x) "▀" {:fg top :bg bot})))))
 
-(defn- chat-image-rows (thumb cx maxw)
+(defn- chat-image-rows (thumb: (or nil (record :width int :height int :rgba bytes)) cx maxw:int)
   "Render a decoded `thumb` (`{:width :height :rgba}`) as a list of visual lines (each a list of
 row-0 ops), packing two pixel rows per cell with the upper-half-block `▀` (fg = top pixel, bg =
 bottom pixel). `cx` is the left indent, `maxw` the cell budget (each row is clipped to it). [] for
@@ -710,7 +710,7 @@ fields rather than failing to match."
 backoff up to `n` times, then tell the inbox it gave up. Runs in its own process so a
 slow or absent peer never blocks the UI; success is surfaced by the tick reconcile."
   (cond
-    (<= n 0) (send (proc/whereis :inbox) [:dial-failed name])
+    (<= n 0) (send :inbox [:dial-failed name])
     else
       (try
         (node/connect name)
@@ -1065,7 +1065,7 @@ splitting an over-long word. Returns at least one line (`\"\"` for empty text)."
   "A ≤5-cell time label for the gutter: 'now' / 'Nm' / 'Nh' when recent (needs the model's
 `now`), else the tz-adjusted `HH:MM`. Right-justified to 5 cells so the gutter stays
 aligned; empty when the entry has no timestamp, or `HH:MM` when `now` is unset (0)."
-  (if (not (number? at))
+  (if (not (int? at))
     ""
     (let (d (- now at))
       (cond
@@ -1218,11 +1218,9 @@ with a `•N` unread dot)."
   "Lay the sidebar lines down the right panel (rows 1 .. `rows`-3), each clamped to `sw`."
   (let (lines (chat-sidebar-lines m)
         h (math/max 0 (- rows 3))
-        vis (take lines h)
-        mk (fn (i)
-             (let (ln (nth vis i))
-               (text (+ 1 i) panel-x (chat-clamp (get ln :text) sw) (get ln :face)))))
-    (map (range (count vis)) mk)))
+        vis (take lines h))
+    (map (seq/enumerate vis)
+      (fn ([i ln]) (text (+ 1 i) panel-x (chat-clamp (get ln :text) sw) (get ln :face))))))
 
 (defn- chat-visible? (e room)
   "Which log entries show in `room`: a room-scoped line (chat, action, or file transfer) only
@@ -1237,7 +1235,7 @@ when its `:room` matches; everything else (DMs, system notes, closure results) s
   "Lay a list of visual `vlines` on consecutive rows from `base`, flattening to ops."
   (mapcat (range (count vlines)) (fn (i) (chat-shift-vline (nth vlines i) (+ base i)))))
 
-(defn chat-view (m cols rows)
+(defn chat-view (m: (record &open :now int :tz-offset int) cols:int rows:int)
   "ui-run view (pure): a header bar; the wrapped/scrollable message log on the left; a
 right-hand roster/rooms panel (auto-hidden on a narrow terminal, `cols` < 60, so it
 degrades to full width); a hint (or a scroll indicator when scrolled up); and the input
